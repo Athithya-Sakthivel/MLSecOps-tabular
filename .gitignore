@@ -123,17 +123,18 @@ ipython_config.py
 #   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
 #   in the .venv directory. It is recommended not to include this directory in version control.
 .pixi
-
+.tmp.md
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
-
+data
 # Celery stuff
 celerybeat-schedule
 celerybeat.pid
-
+.tmp
+.repos
 # SageMath parsed files
 *.sage.py
-
+tmp.md
 # Environments
 .env
 .envrc
