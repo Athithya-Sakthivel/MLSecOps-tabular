@@ -1,7 +1,8 @@
 
 Connection URIs (masked):
 
+postgresql://app:*****@postgres-pooler.default:5432/iceberg_catalogue_metadata
 postgresql://app:*****@postgres-pooler.default:5432/flyte_admin
 postgresql://app:*****@postgres-pooler.default:5432/flyte_propeller
 postgresql://app:*****@postgres-pooler.default:5432/mlflow
-postgresql://app:*****@postgres-pooler.default:5432/rising_wave
+postgresql://app:*****@postgres-pooler.default:5432/app

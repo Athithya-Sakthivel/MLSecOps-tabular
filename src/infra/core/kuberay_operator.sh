@@ -6,7 +6,7 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly K8S_CLUSTER="${K8S_CLUSTER:-kind}" # eks|gke|aks
+readonly K8S_CLUSTER="${K8S_CLUSTER:-kind}" # or cloud
 readonly HELM_RELEASE="kuberay-operator"
 readonly HELM_REPO="kuberay"
 readonly HELM_REPO_URL="https://ray-project.github.io/kuberay-helm/"

@@ -8,13 +8,13 @@ spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:18.3-minimal-trixie
   bootstrap:
     initdb:
-      database: app
+      database: iceberg_catalogue_metadata
       owner: app
       postInitSQL:
         - CREATE DATABASE flyte_admin OWNER app;
         - CREATE DATABASE flyte_propeller OWNER app;
         - CREATE DATABASE mlflow OWNER app;
-        - CREATE DATABASE rising_wave OWNER app;
+        - CREATE DATABASE app OWNER app;
       postInitApplicationSQL:
         - ALTER SCHEMA public OWNER TO app;
   storage:

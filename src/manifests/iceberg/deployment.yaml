@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iceberg-rest
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iceberg-rest
+  template:
+    metadata:
+      labels:
+        app: iceberg-rest
+    spec:
+      serviceAccountName: iceberg-rest-sa
+      initContainers:
+      - name: copy-config
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - cp -a /config/. /conf/ || true
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: conf
+          mountPath: /conf
+      containers:
+      - name: grav
+        image: ghcr.io/athithya-sakthivel/iceberg-rest-postgres@sha256:55250a42cd067c92a27559a5bebab570586b34b057d7ca9adf42f45a8ebab1a4
+        ports:
+        - containerPort: 9001
+        env:
+        - name: GRAVITINO_VERSION
+          value: "1.1.0"
+        - name: GRAVITINO_MEM
+          value: "-Xms512m -Xmx512m"
+        - name: GRAVITINO_ICEBERG_REST_IO_IMPL
+          value: "org.apache.iceberg.aws.s3.S3FileIO"
+        - name: GRAVITINO_ICEBERG_REST_JDBC_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-cluster-app
+              key: username
+        - name: GRAVITINO_ICEBERG_REST_JDBC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-cluster-app
+              key: password
+        - name: GRAVITINO_ICEBERG_REST_S3_ENDPOINT
+          value: ""
+        - name: GRAVITINO_ICEBERG_REST_JDBC_MAX_CONNECTIONS
+          value: "20"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: iceberg-storage-credentials
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: iceberg-storage-credentials
+              key: AWS_SECRET_ACCESS_KEY
+        - name: AWS_REGION
+          value: "ap-south-1"
+        - name: ICEBERG_REST_AUTH_TYPE
+          value: "basic"
+        - name: ICEBERG_REST_USER
+          valueFrom:
+            secretKeyRef:
+              name: iceberg-rest-auth
+              key: user
+        - name: ICEBERG_REST_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: iceberg-rest-auth
+              key: password
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        volumeMounts:
+        - name: conf
+          mountPath: /root/gravitino-iceberg-rest-server/conf
+          readOnly: false
+      volumes:
+      - name: config
+        configMap:
+          name: iceberg-rest-conf
+      - name: conf
+        emptyDir: {}

@@ -1,6 +1,6 @@
 lc:
-	kind delete cluster --name local-cluster && kind create cluster --name local-cluster && bash src/core/default_storage_class.sh && sleep 10 && \
-	bash src/core/postgres_cluster.sh --rollout
+	kind delete cluster --name local-cluster && kind create cluster --name local-cluster && bash src/infra/core/default_storage_class.sh && sleep 15 && \
+	bash src/infra/core/postgres_cluster.sh --rollout && bash src/infra/iceberg/iceberg.sh --rollout
 
 set-sa:
 	bash src/core/default_storage_class.sh
