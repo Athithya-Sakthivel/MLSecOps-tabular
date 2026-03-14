@@ -1,0 +1,96 @@
+name: Build and Push Spark Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - src/infra/spark/**
+  workflow_dispatch:
+    inputs:
+      spark_version:
+        description: "Spark version"
+        required: true
+        default: "4.0.2"
+      registry_type:
+        description: "Target registry"
+        required: true
+        default: "ghcr"
+        type: choice
+        options:
+          - ghcr
+          - ecr
+      ecr_repo:
+        description: "ECR repo (full registry/repo), required if registry_type=ecr"
+        required: false
+        default: ""
+      aws_region:
+        description: "AWS region for ECR"
+        required: false
+        default: "ap-south-1"
+      force_rebuild:
+        description: "Force build/push even if an identical image exists"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: spark-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.12.0
+
+      - name: Prepare env
+        run: |
+          echo "SPARK_VERSION=${{ github.event.inputs.spark_version }}" >> $GITHUB_ENV
+          echo "REGISTRY_TYPE=${{ github.event.inputs.registry_type }}" >> $GITHUB_ENV
+          echo "ECR_REPO=${{ github.event.inputs.ecr_repo }}" >> $GITHUB_ENV
+          echo "AWS_REGION=${{ github.event.inputs.aws_region }}" >> $GITHUB_ENV
+          echo "GITHUB_USER=${{ github.repository_owner }}" >> $GITHUB_ENV
+          echo "IMAGE_REPO=spark" >> $GITHUB_ENV
+          echo "PLATFORMS=linux/amd64,linux/arm64" >> $GITHUB_ENV
+          echo "TRIVY_IMAGE=aquasec/trivy@sha256:3d1f862cb6c4fe13c1506f96f816096030d8d5ccdb2380a3069f7bf07daa86aa" >> $GITHUB_ENV
+          echo "TRIVY_SEVERITY=CRITICAL" >> $GITHUB_ENV
+          echo "FORCE_REBUILD=${{ github.event.inputs.force_rebuild }}" >> $GITHUB_ENV
+
+      - name: Configure AWS (for ECR)
+        if: ${{ github.event.inputs.registry_type == 'ecr' && (secrets.AWS_ROLE_ARN != '' || secrets.AWS_ACCESS_KEY_ID != '') }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN || '' }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || '' }}
+
+      - name: Run build script
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPARK_VERSION: ${{ env.SPARK_VERSION }}
+          GITHUB_USER: ${{ env.GITHUB_USER }}
+          REGISTRY: ${{ env.REGISTRY || '' }}
+          REGISTRY_TYPE: ${{ env.REGISTRY_TYPE }}
+          IMAGE_REPO: ${{ env.IMAGE_REPO }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          PLATFORMS: ${{ env.PLATFORMS }}
+          TRIVY_IMAGE: ${{ env.TRIVY_IMAGE }}
+          TRIVY_SEVERITY: ${{ env.TRIVY_SEVERITY }}
+          ECR_REPO: ${{ env.ECR_REPO }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          FORCE_REBUILD: ${{ env.FORCE_REBUILD }}
+        run: bash src/infra/spark/CI.sh

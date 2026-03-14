@@ -50,3 +50,5 @@ def extract_load_data(start_date: str, end_date: str, raw_uri: str, feature_sche
             raise RuntimeError("raw_uri not found")
     logger.info("Wrote raw snapshot %s rows=%d", outfile, pd.read_parquet(outfile).shape[0])
     return FlyteFile(outfile)
+
+

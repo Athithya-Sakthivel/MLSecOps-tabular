@@ -5,14 +5,13 @@
 
 set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly REPO_ROOT="$(pwd)"
 readonly MANIFEST_DIR="${REPO_ROOT}/src/manifests/storageclass"
 readonly TARGET_SC="default-storage-class"
-
-readonly K8S_CLUSTER="${K8S_CLUSTER:-kind}" # or eks|gke|aks
+readonly K8S_CLUSTER="${K8S_CLUSTER:-kind}"
 readonly LOCAL_PATH_PROVISIONER_TAG="${LOCAL_PATH_PROVISIONER_TAG:-v0.0.35}"
 
-log()  { printf '[%s] [%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "${K8S_CLUSTER:-auto}" "$*" >&2; }
+log(){ printf '[%s] [%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "${K8S_CLUSTER:-auto}" "$*" >&2; }
 fatal(){ printf '[ERROR] [%s] %s\n' "${K8S_CLUSTER:-auto}" "$*" >&2; exit 1; }
 require_bin(){ command -v "$1" >/dev/null 2>&1 || fatal "$1 not found in PATH"; }
 kubectl_wait_rollout(){
@@ -37,17 +36,14 @@ detect_provider(){
   local providerID nodeName
   nodeName="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   providerID="$(kubectl get node "${nodeName}" -o jsonpath='{.spec.providerID}' 2>/dev/null || true)"
-
   if [[ "${providerID}" == aws* || "${providerID}" == aws://* ]] || kubectl get csidrivers 2>/dev/null | grep -q 'ebs.csi.aws.com'; then
     echo "eks"
     return 0
   fi
-
   if [[ "${providerID}" == gce* || "${providerID}" == gce://* ]] || kubectl get csidrivers 2>/dev/null | grep -q 'pd.csi.storage.gke.io'; then
     echo "gke"
     return 0
   fi
-
   if [[ "${providerID}" == azure* || "${providerID}" == azure://* ]] || kubectl get csidrivers 2>/dev/null | grep -q 'disk.csi.azure.com'; then
     echo "aks"
     return 0
@@ -60,18 +56,19 @@ detect_provider(){
   fi
   echo "unknown"
 }
+
 ensure_single_default_annotation(){
   mapfile -t defaults < <(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
   for sc in "${defaults[@]:-}"; do
     if [[ "${sc}" != "${TARGET_SC}" ]]; then
       log "removing default annotation from existing StorageClass '${sc}'"
-      kubectl patch storageclass "${sc}" -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": null}}}' >/dev/null || \
-        fatal "failed to remove default annotation from '${sc}'"
+      kubectl patch storageclass "${sc}" -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": null}}}' >/dev/null || fatal "failed to remove default annotation from '${sc}'"
     fi
   done
 }
+
 save_and_apply_manifest(){
-  local out_file="$1" 
+  local out_file="$1"
   shift
   mkdir -p "$(dirname "${out_file}")"
   cat - > "${out_file}"
@@ -186,7 +183,6 @@ install_local_path_provisioner(){
     log "local-path-provisioner already installed"
     return 0
   fi
-
   log "installing local-path-provisioner ${LOCAL_PATH_PROVISIONER_TAG}"
   kubectl apply -f "https://raw.githubusercontent.com/rancher/local-path-provisioner/${LOCAL_PATH_PROVISIONER_TAG}/deploy/local-path-storage.yaml" >/dev/null 2>&1 || fatal "failed to install local-path-provisioner"
   kubectl_wait_rollout local-path-storage local-path-provisioner 180s || log "continuing despite local-path-provisioner not being fully ready"
@@ -202,14 +198,12 @@ ensure_csi_driver_present(){
     log "CSI driver pods/deployments for '${prov}' appear present (fallback check)"
     return 0
   fi
-
-  fatal "required CSI driver '${prov}' not found in cluster. Install the provider CSI driver (example docs: AWS EBS CSI, GCE PD CSI, Azure Disk CSI) before creating the StorageClass."
+  fatal "required CSI driver '${prov}' not found in cluster. Install the provider CSI driver before creating the StorageClass."
 }
 
 ensure_storage_class(){
   local cluster="$1"
   log "ensure_storage_class: target cluster type -> ${cluster}"
-
   if kubectl get storageclass "${TARGET_SC}" >/dev/null 2>&1; then
     log "StorageClass '${TARGET_SC}' already exists. Verifying it's valid..."
     local prov
@@ -235,7 +229,6 @@ ensure_storage_class(){
       create_storageclass_kind
       ;;
     eks)
-
       ensure_csi_driver_present "ebs.csi.aws.com"
       ensure_single_default_annotation
       create_storageclass_eks
@@ -275,11 +268,9 @@ main(){
   else
     log "auto-detected cluster type: ${cluster}"
   fi
-
   log "starting storage-class setup for cluster=${cluster}"
   ensure_storage_class "${cluster}"
   log "storage-class setup complete"
-
   cat <<EOF
 
 [SUCCESS] StorageClass '${TARGET_SC}' is ready in cluster type='${cluster}'
@@ -290,11 +281,6 @@ To verify:
 
 Manifests were rendered to:
   ${MANIFEST_DIR}/
-
-If your cloud cluster failed due to a missing CSI driver, follow the provider docs:
-  AWS EBS CSI:  https://github.com/kubernetes-sigs/aws-ebs-csi-driver
-  GCE PD CSI:   https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/gce-pd-csi-driver
-  Azure Disk CSI:https://github.com/kubernetes-sigs/azuredisk-csi-driver
 
 EOF
 }
