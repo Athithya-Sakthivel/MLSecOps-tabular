@@ -30,7 +30,7 @@ INITDB_DB="${INITDB_DB:-iceberg_catalogue_metadata}"
 ADDITIONAL_DBS=(flyte_admin flyte_propeller mlflow app)
 
 if [[ "${K8S_CLUSTER}" == "kind" ]]; then
-  INSTANCES=2
+  INSTANCES=1
   CPU_REQUEST="250m"; CPU_LIMIT="1000m"
   MEM_REQUEST="512Mi"; MEM_LIMIT="1Gi"
   STORAGE_SIZE="5Gi"; WAL_SIZE="2Gi"
