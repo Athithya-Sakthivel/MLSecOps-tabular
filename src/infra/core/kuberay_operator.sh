@@ -64,23 +64,20 @@ dump_diagnostics() {
 }
 
 rollout() {
-  log "starting rollout for K8S_CLUSTER=$K8S_CLUSTER"
+  log "starting rollout cluster=${K8S_CLUSTER}"
   install_operator
-  
-  cat <<EOFNEXT
 
-[SUCCESS] Rollout complete for K8S_CLUSTER=$K8S_CLUSTER
+  printf '\n[STATUS] rollout_complete cluster=%s namespace=%s release=%s replicas=%s\n' \
+    "$K8S_CLUSTER" "$NAMESPACE" "$HELM_RELEASE" "${REPLICAS[$K8S_CLUSTER]}"
 
-OPERATOR DETAILS:
-  NAMESPACE=${NAMESPACE}
-  RELEASE=${HELM_RELEASE}
-  REPLICAS=${REPLICAS[$K8S_CLUSTER]}
+  printf '\n[VERIFY] crds\n'
+  kubectl get crds | grep ray || true
 
-NEXT STEPS:
-  1. Verify CRDs: kubectl get crds | grep ray
-  2. Check operator: kubectl -n ${NAMESPACE} get pods
-  3. Run tests: K8S_CLUSTER=${K8S_CLUSTER} bash ${SCRIPT_DIR}/../tests/kuberay_operator.sh --test
-EOFNEXT
+  printf '\n[VERIFY] pods\n'
+  kubectl -n "${NAMESPACE}" get pods -o wide || true
+
+  printf '\n[VERIFY] deployment\n'
+  kubectl -n "${NAMESPACE}" get deployment "${HELM_RELEASE}" -o wide || true
 }
 
 cleanup() {

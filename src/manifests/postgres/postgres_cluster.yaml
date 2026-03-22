@@ -4,7 +4,7 @@ metadata:
   name: postgres-cluster
   namespace: default
 spec:
-  instances: 2
+  instances: 1
   imageName: ghcr.io/cloudnative-pg/postgresql:18.3-minimal-trixie
   bootstrap:
     initdb:
@@ -12,7 +12,7 @@ spec:
       owner: app
       postInitSQL:
         - CREATE DATABASE flyte_admin OWNER app;
-        - CREATE DATABASE flyte_propeller OWNER app;
+        - CREATE DATABASE datacatalog OWNER app;
         - CREATE DATABASE mlflow OWNER app;
         - CREATE DATABASE app OWNER app;
       postInitApplicationSQL:

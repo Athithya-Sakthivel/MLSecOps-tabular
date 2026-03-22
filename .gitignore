@@ -107,7 +107,11 @@ ipython_config.py
 #   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
 #poetry.lock
 #poetry.toml
-
+Spark
+Flyte
+Iceberg
+S3
+Postgres
 # pdm
 #   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
 #   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
@@ -116,7 +120,7 @@ ipython_config.py
 #pdm.toml
 .pdm-python
 .pdm-build/
-
+src/manifests/flyte/values.yaml
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 #pixi.lock

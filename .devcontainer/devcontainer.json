@@ -38,11 +38,7 @@
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-vscode-remote.remote-containers",
-        "ms-python.debugpy",
-        "ms-python.python",
-        "ms-python.vscode-pylance",
-        "redhat.vscode-yaml"
+        "ms-vscode-remote.remote-containers"
       ],
       "settings": {
         "files.autoSave": "afterDelay",

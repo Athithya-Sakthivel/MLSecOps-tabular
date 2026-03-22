@@ -27,7 +27,7 @@ SECRET_TIMEOUT="${SECRET_TIMEOUT:-180}"
 
 STORAGE_CLASS_NAME="${STORAGE_CLASS_NAME:-default-storage-class}"
 INITDB_DB="${INITDB_DB:-iceberg_catalogue_metadata}"
-ADDITIONAL_DBS=(flyte_admin flyte_propeller mlflow app)
+ADDITIONAL_DBS=(flyte_admin datacatalog mlflow app)
 
 if [[ "${K8S_CLUSTER}" == "kind" ]]; then
   INSTANCES=1

@@ -72,8 +72,16 @@ curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.
 echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
-
+python3 -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip wheel 
+
+python3.12 -m pip install \
+  flytekit==1.16.15 \
+  flytekitplugins-spark==1.16.15 \
+  pyspark==4.1.1 \
+  cloudpickle==3.1.2
+
+curl -sL https://ctl.flyte.org/install | sudo bash -s -- -b /usr/local/bin v0.9.8
 
 curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | DESIRED_VERSION=v3.15.4 bash
 wget -qO- https://github.com/gitleaks/gitleaks/releases/download/v8.30.0/gitleaks_8.30.0_linux_x64.tar.gz | tar xz && \
@@ -88,5 +96,3 @@ aws --version
 ruff version
 kubectl version
 tofu version
-
-# curl -sL https://ctl.flyte.org/install | sudo bash -s -- -b /usr/local/bin && flytectl demo start

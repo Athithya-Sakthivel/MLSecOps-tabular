@@ -4,11 +4,10 @@
 # Additionally: renders the StorageClass YAML into src/manifests/storageclass/
 
 set -euo pipefail
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(pwd)"
-readonly MANIFEST_DIR="${REPO_ROOT}/src/manifests/storageclass"
-readonly TARGET_SC="default-storage-class"
+
 readonly K8S_CLUSTER="${K8S_CLUSTER:-kind}"
+readonly MANIFEST_DIR="src/manifests/storageclass"
+readonly TARGET_SC="default-storage-class"
 readonly LOCAL_PATH_PROVISIONER_TAG="${LOCAL_PATH_PROVISIONER_TAG:-v0.0.35}"
 
 log(){ printf '[%s] [%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "${K8S_CLUSTER:-auto}" "$*" >&2; }
