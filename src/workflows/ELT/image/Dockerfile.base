@@ -1,3 +1,7 @@
+# Builds a minimal Python 3.12 + Java 17 container with an isolated virtualenv and runtime configs for PySpark and Flyte
+# Installs pinned Python deps (Flytekit, PySpark) and injects Iceberg + Hadoop AWS + AWS SDK JARs for Spark interoperability
+# Validates Spark setup, then drops privileges to a non-root user for safer execution
+
 FROM python:3.12.3-slim-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
