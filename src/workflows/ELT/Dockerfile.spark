@@ -1,4 +1,5 @@
-FROM apache/spark:3.5.8-scala2.12-java17-python3-ubuntu
+# docker.io/apache/spark:3.5.8-scala2.12-java17-python3-ubuntu
+FROM apache/spark@sha256:dbe5f3b3926b01fa0b818ae8463c2994bfd2945d8db96d2337e23dc62d6fa73d
 
 USER root
 

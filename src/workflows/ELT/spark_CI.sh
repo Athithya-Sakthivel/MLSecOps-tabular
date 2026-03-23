@@ -17,6 +17,8 @@ require_cmd awk
 require_cmd tar
 
 repo_root="${GITHUB_WORKSPACE:-$(pwd)}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 cd "${repo_root}"
 
 IMAGE_NAME="${IMAGE_NAME:-flyte-elt-spark-base}"
@@ -39,7 +41,7 @@ TRIVY_TIMEOUT="${TRIVY_TIMEOUT:-10m}"
 GITLEAKS_VERSION="${GITLEAKS_VERSION:-8.30.1}"
 GITLEAKS_CONFIG="${GITLEAKS_CONFIG:-.gitleaks.toml}"
 
-PUSH_IMAGE="${PUSH_IMAGE:-false}"
+PUSH_IMAGE="${PUSH_IMAGE:-true}"
 GIT_PAT="${GIT_PAT:-}"
 
 TEMP_DIR="$(mktemp -d)"
@@ -65,6 +67,33 @@ registry_repo() {
       die "REGISTRY_TYPE must be ghcr or ecr"
       ;;
   esac
+}
+
+resolve_gitleaks_config() {
+  local config_input="${GITLEAKS_CONFIG:-}"
+  local candidates=()
+  local candidate
+
+  if [ -n "${config_input}" ]; then
+    if [ -f "${config_input}" ]; then
+      printf '%s\n' "${config_input}"
+      return 0
+    fi
+    candidates+=("${repo_root}/${config_input}")
+    candidates+=("${script_dir}/${config_input}")
+  fi
+
+  candidates+=("${repo_root}/.gitleaks.toml")
+  candidates+=("${script_dir}/.gitleaks.toml")
+
+  for candidate in "${candidates[@]}"; do
+    if [ -f "${candidate}" ]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 install_gitleaks() {
@@ -99,18 +128,20 @@ install_gitleaks() {
 
 run_gitleaks() {
   local report="${repo_root}/gitleaks.sarif"
+  local config_path=""
 
-  log "Running Gitleaks"
-  if [ -f "${GITLEAKS_CONFIG}" ]; then
+  if config_path="$(resolve_gitleaks_config)"; then
+    log "Running Gitleaks with config: ${config_path}"
     gitleaks detect \
       --source . \
-      --config "${GITLEAKS_CONFIG}" \
+      --config "${config_path}" \
       --redact \
       --no-banner \
       --report-format sarif \
       --report-path "${report}" \
       --exit-code 1
   else
+    warn "No Gitleaks config found; running with default rules"
     gitleaks detect \
       --source . \
       --redact \

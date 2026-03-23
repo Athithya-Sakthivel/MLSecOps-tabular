@@ -109,7 +109,7 @@ jobs:
       - name: Run Spark CI and push to GHCR
         env:
           GIT_PAT: ${{ secrets.GIT_PAT }}
-        run: bash src/workflows/ELT/CI.sh
+        run: bash src/workflows/ELT/spark_CI.sh
 
   publish-ecr:
     name: spark-publish-ecr
