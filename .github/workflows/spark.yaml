@@ -73,7 +73,7 @@ jobs:
         uses: docker/setup-buildx-action@v3.12.0
 
       - name: Run Spark CI
-        run: bash src/workflows/ELT/CI.sh
+        run: bash src/workflows/ELT/spark_CI.sh
 
       - name: Upload scan artifacts
         if: always()

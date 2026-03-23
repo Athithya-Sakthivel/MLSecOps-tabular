@@ -23,7 +23,7 @@ RUN mkdir -p "${SPARK_HOME}/jars"; \
       -o "${SPARK_HOME}/jars/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar" && \
     curl -fsSL \
       "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" \
-      -o "${SPARK_HOME}/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; \
+      -o "${SPARK_HOME}/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; && \
     curl -fsSL \
       "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_BUNDLE_VERSION}/bundle-${AWS_SDK_BUNDLE_VERSION}.jar" \
       -o "${SPARK_HOME}/jars/bundle-${AWS_SDK_BUNDLE_VERSION}.jar"; \
