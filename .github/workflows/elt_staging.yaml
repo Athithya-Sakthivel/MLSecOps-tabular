@@ -45,7 +45,7 @@ jobs:
 
       - name: Run Spark CI
         env:
-          PUSH_IMAGE: 'false'
+          PUSH_IMAGE: 'true'
         run: bash src/workflows/ELT/CI.sh
 
   publish:
