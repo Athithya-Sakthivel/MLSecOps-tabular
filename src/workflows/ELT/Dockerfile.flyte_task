@@ -1,7 +1,7 @@
 # Single runtime image for the ELT Flyte Spark task.
 # Contract:
 # - contains Spark + Iceberg + Hadoop AWS + Flytekit
-# - contains no application source code to avoid rebuilds
+# - contains no application source code to avoid frequent rebuild
 # - is used as the only runtime image by Flyte
 # docker.io/apache/spark:4.0.2-scala2.13-java21-python3-r-ubuntu
 

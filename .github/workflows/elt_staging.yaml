@@ -29,7 +29,7 @@ jobs:
   scan:
     name: spark-scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -45,18 +45,17 @@ jobs:
 
       - name: Run Spark CI
         env:
-          PUSH_IMAGE: 'true'
+          PUSH_IMAGE: 'false'
         run: bash src/workflows/ELT/CI.sh
 
-  publish:
-    name: spark-publish
+  build:
+    name: spark-build-publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     needs: scan
     if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+
     environment: staging
-    permissions:
-      contents: read
 
     env:
       GIT_PAT: ${{ secrets.GIT_PAT }}
