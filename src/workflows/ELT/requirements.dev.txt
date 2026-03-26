@@ -1,5 +1,0 @@
-datasets==4.7.0
-flytekit==1.16.15
-flytekitplugins-spark==1.16.15
-pyspark==4.1.1
-cloudpickle==3.1.2

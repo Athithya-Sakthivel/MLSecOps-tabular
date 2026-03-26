@@ -1,24 +1,22 @@
-name: spark-image-ci
+name: train-image-ci
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - src/workflows/ELT/**
-      - .github/workflows/spark.yaml
-      - .gitleaks.toml
+      - src/workflows/train/**
+      - .github/workflows/train_staging.yaml
   pull_request:
     paths:
-      - src/workflows/ELT/**
-      - .github/workflows/spark.yaml
-      - .gitleaks.toml
+      - src/workflows/train/**
+      - .github/workflows/train_staging.yaml
 
 permissions:
   contents: read
 
 concurrency:
-  group: spark-image-ci-${{ github.ref }}
+  group: train-image-ci-${{ github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -27,7 +25,7 @@ defaults:
 
 jobs:
   scan:
-    name: spark-scan
+    name: train-scan
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: staging
@@ -45,15 +43,15 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.12.0
+        uses: docker/setup-buildx-action@v3
 
-      - name: Run Spark CI
+      - name: Run Train CI
         env:
           PUSH_IMAGE: 'false'
-        run: bash src/workflows/ELT/CI_staging.sh
+        run: bash src/workflows/train/CI.sh
 
   build:
-    name: spark-build-publish
+    name: train-build-publish
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: scan
@@ -73,9 +71,9 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.12.0
+        uses: docker/setup-buildx-action@v3
 
-      - name: Run Spark CI and publish image
+      - name: Build and publish image
         env:
           PUSH_IMAGE: 'true'
-        run: bash src/workflows/ELT/CI_staging.sh
+        run: bash src/workflows/train/CI_staging.sh

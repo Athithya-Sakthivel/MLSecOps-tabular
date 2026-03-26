@@ -72,14 +72,20 @@ curl -s "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.
 echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
 source ~/.bashrc
 
-python3 -m venv .venv && source .venv/bin/activate
-pip install --upgrade pip wheel 
+python3 -m venv .venv_elt && source .venv_elt/bin/activate && pip install --upgrade pip==26.0.1 wheel==0.46.3
 
 python3.12 -m pip install \
+  datasets==4.7.0 \
   flytekit==1.16.15 \
   flytekitplugins-spark==1.16.15 \
   pyspark==4.1.1 \
   cloudpickle==3.1.2
+
+python3 -m venv .venv_train && source .venv_train/bin/activate && pip install --upgrade pip==26.0.1 wheel==0.46.3
+
+
+
+
 
 curl -sL https://ctl.flyte.org/install | sudo bash -s -- -b /usr/local/bin v0.9.8
 

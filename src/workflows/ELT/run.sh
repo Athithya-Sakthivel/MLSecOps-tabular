@@ -259,13 +259,16 @@ main() {
 
   case "${1:-}" in
     --submit)
+      source .venv/bin/activate
       submit_execution
       ;;
     --diagnose)
+      source .venv/bin/activate
       [[ $# -ge 2 ]] || fatal "--diagnose requires an execution id"
       diagnose_execution "$2"
       ;;
     --delete)
+      source .venv/bin/activate
       [[ $# -ge 2 ]] || fatal "--delete requires an execution id"
       delete_execution "$2"
       ;;

@@ -1,0 +1,29 @@
+# Core ML
+flaml==2.5.0
+lightgbm==4.6.0
+
+# Ray (distributed training runtime)
+ray[train,data]==2.54.0
+
+# ONNX stack
+onnx==1.20.1
+onnxmltools==1.16.0
+onnxruntime==1.24.4
+
+# ML ecosystem
+scikit-learn==1.5.2
+numpy==1.26.4
+pandas==2.2.3
+
+# Cloud agnostic Data / storage
+pyarrow==23.0.1
+fsspec==2026.2.0
+s3fs==2026.2.0
+
+# Orchestration
+flytekit==1.16.15
+flyteplugins-ray==2.0.6
+
+# Tracking
+mlflow==3.10.1
+
