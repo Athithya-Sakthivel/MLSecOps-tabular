@@ -1,9 +1,11 @@
-# Single runtime image for the ELT Flyte Spark task.
-# Contracts:
-# - contains Spark + Iceberg + Hadoop AWS + Flytekit
-# - contains no application source code to avoid frequent rebuild
-# - is used as the only runtime image by Flyte
-# FROM docker.io/apache/spark:4.0.2-scala2.13-java21-python3-r-ubuntu
+# Single runtime image for Flyte ELT Spark tasks.
+# Base already includes Spark 4.0.2 + Java 21 + Python 3 (+ pip) + R on Ubuntu.
+# Adds:
+# - isolated Python venv for Flyte execution
+# - minimal task dependencies (flytekit, datasets, etc.)
+# - Iceberg + Hadoop AWS runtime jars
+# - writable /tmp-based cache to avoid /nonexistent permission errors
+# No application source code is baked in (uses pyflyte fast-execute).
 
 FROM apache/spark@sha256:f8935c04e65e9298c883167f07abdb0c8ed4d611987ea55dc973d3c3b7b3a109
 
@@ -19,32 +21,40 @@ ENV SPARK_HOME=/opt/spark \
     PATH=/opt/venv/bin:$PATH \
     PYSPARK_PYTHON=/opt/venv/bin/python \
     PYSPARK_DRIVER_PYTHON=/opt/venv/bin/python \
+    HOME=/tmp \
+    TMPDIR=/tmp \
+    HF_HOME=/tmp/huggingface \
+    HUGGINGFACE_HUB_CACHE=/tmp/huggingface/hub \
+    HF_DATASETS_CACHE=/tmp/huggingface/datasets \
+    XDG_CACHE_HOME=/tmp/.cache \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1
 
+# Keep the image lean:
+# - no python3/python3-pip install (already present in the upstream Spark variant)
+# - no pyspark pip install (Spark already provides the runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    python3 \
-    python3-pip \
     python3-venv \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
+# Preserve /opt/venv/bin/python so current Flyte task code does not need changes.
 RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
       wheel==0.46.3 && \
-    /opt/venv/bin/pip install \
+    /opt/venv/bin/pip install --no-cache-dir \
+      cloudpickle==3.1.2 \
       datasets==4.8.4 \
       flytekit==1.16.15 \
-      flytekitplugins-spark==1.16.15 \
-      pyspark==4.0.2 \
-      cloudpickle==3.1.2
+      flytekitplugins-spark==1.16.15
 
 RUN set -eux; \
-    mkdir -p "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir"; \
+    mkdir -p "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" \
+             "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}"; \
     curl -fsSL \
       "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar" \
       -o "${SPARK_HOME}/jars/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar"; \
@@ -54,8 +64,8 @@ RUN set -eux; \
     curl -fsSL \
       "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_BUNDLE_VERSION}/bundle-${AWS_SDK_BUNDLE_VERSION}.jar" \
       -o "${SPARK_HOME}/jars/bundle-${AWS_SDK_BUNDLE_VERSION}.jar"; \
-    chmod -R a+rX "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir"; \
-    chown -R 185:0 "${SPARK_HOME}" /opt/venv
+    chmod -R a+rX "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${XDG_CACHE_HOME}"; \
+    chown -R 185:0 "${SPARK_HOME}" /opt/venv "${HF_HOME}" "${XDG_CACHE_HOME}"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 

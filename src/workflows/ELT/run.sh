@@ -4,34 +4,22 @@
 #   - diagnose: inspect a prior Flyte execution and the related Kubernetes pods/events
 #   - delete: delete a Flyte execution only
 #
-# This script is intended for local operator use.
-# The workflow itself runs remotely in Flyte-managed pods.
+# This script is intended for local operator use. Ensure git push before every run
+# The workflow itself runs remotely in Flyte-managed k8s pods.
 #
 # Examples:
 #   bash src/workflows/ELT/run.sh --submit
 #   bash src/workflows/ELT/run.sh --diagnose <execution_id>
 #   bash src/workflows/ELT/run.sh --delete <execution_id>
-#   bash src/workflows/ELT/run.sh --lint
-#
-# Recommended environment overrides:
-#   REMOTE_PROJECT=flytesnacks
-#   REMOTE_DOMAIN=development
-#   TASK_NAMESPACE=flytesnacks-development
-#   VENV_DIR=.venv_elt
-#   WORKFLOW_FILE=src/workflows/ELT/workflows/elt_workflow.py
-#   WORKFLOW_NAME=elt_workflow
-#   WORKFLOW_PACKAGE_DIR=src/workflows/ELT
-#   ELT_TASK_IMAGE=ghcr.io/<user>/flyte-elt-task:<tag>
 
 set -Eeuo pipefail
-
 
 export ELT_TASK_IMAGE="ghcr.io/athithya-sakthivel/flyte-elt-task:1.0.9"
 
 REMOTE_PROJECT="${REMOTE_PROJECT:-flytesnacks}"
 REMOTE_DOMAIN="${REMOTE_DOMAIN:-development}"
 TASK_NAMESPACE="${TASK_NAMESPACE:-${REMOTE_PROJECT}-${REMOTE_DOMAIN}}"
-PYTHONPATH="/workspace/src:${PYTHONPATH:-}"
+export PYTHONPATH="/workspace/src/"
 PORT_FORWARD_PID_FILE="${PORT_FORWARD_PID_FILE:-/tmp/flyteadmin-portforward.pid}"
 PORT_FORWARD_LOG="${PORT_FORWARD_LOG:-/tmp/flyteadmin-portforward.log}"
 PORT_FORWARD_HOST="${PORT_FORWARD_HOST:-127.0.0.1}"
@@ -40,12 +28,10 @@ WORKFLOW_FILE="${WORKFLOW_FILE:-src/workflows/ELT/workflows/elt_workflow.py}"
 WORKFLOW_NAME="${WORKFLOW_NAME:-elt_workflow}"
 WORKFLOW_PACKAGE_DIR="${WORKFLOW_PACKAGE_DIR:-src/workflows/ELT}"
 
-
 VENV_DIR="${VENV_DIR:-.venv_elt}"
 if [[ ! -f "${VENV_DIR}/bin/activate" && -f ".venv/bin/activate" ]]; then
   VENV_DIR=".venv"
 fi
-
 
 log() { printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 fatal() { log "FATAL: $*"; exit 1; }
@@ -90,11 +76,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-lint_sources() {
-  log "Running Ruff fix pass"
-  ruff check src/workflows/ELT --fix --no-unsafe-fixes
-}
-
 start_port_forward() {
   if [[ -f "${PORT_FORWARD_PID_FILE}" ]]; then
     local old_pid
@@ -132,7 +113,7 @@ derive_execution_name() {
     short_sha="$(git rev-parse --short=7 HEAD)"
   fi
   local ts
-  ts="$(date -u +%Y-%m-%d-%H%M%S)"
+  ts="$(TZ=Asia/Kolkata date +%Y-%m-%d-%H%M%S)"
   printf '%s-%s' "${short_sha}" "${ts}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-'
 }
 
@@ -215,7 +196,6 @@ diagnose_execution() {
 }
 
 submit_execution() {
-  lint_sources
   start_port_forward
   init_flytectl
 
@@ -236,8 +216,7 @@ submit_execution() {
     -p "${REMOTE_PROJECT}" \
     -d "${REMOTE_DOMAIN}" \
     "${WORKFLOW_FILE}" \
-    "${WORKFLOW_NAME}" \
-    --name "${exec_name}"
+    "${WORKFLOW_NAME}" 
 }
 
 delete_execution() {
@@ -249,6 +228,17 @@ delete_execution() {
 
   log "Deleting execution ${exec_id}"
   flytectl delete execution "${exec_id}" -p "${REMOTE_PROJECT}" -d "${REMOTE_DOMAIN}"
+}
+
+lint_workflow() {
+  require_submit_prereqs
+
+  if [[ ! -d "${WORKFLOW_PACKAGE_DIR}" ]]; then
+    fatal "workflow package directory not found: ${WORKFLOW_PACKAGE_DIR}"
+  fi
+
+  log "Running ruff on ${WORKFLOW_PACKAGE_DIR}"
+  ruff check "${WORKFLOW_PACKAGE_DIR}"
 }
 
 usage() {
@@ -266,8 +256,8 @@ Optional environment variables:
   WORKFLOW_FILE=${WORKFLOW_FILE}
   WORKFLOW_NAME=${WORKFLOW_NAME}
   WORKFLOW_PACKAGE_DIR=${WORKFLOW_PACKAGE_DIR}
-  GHCR_USER=${GHCR_USER}
-  IMAGE_TAG=${IMAGE_TAG}
+  GHCR_USER=${GHCR_USER:-}
+  IMAGE_TAG=${IMAGE_TAG:-}
   ELT_TASK_IMAGE=${ELT_TASK_IMAGE}
   VENV_DIR=${VENV_DIR}
 EOF
@@ -280,6 +270,7 @@ main() {
   case "${1:-}" in
     --submit)
       require_submit_prereqs
+      lint_workflow
       submit_execution
       ;;
     --diagnose)
@@ -291,8 +282,7 @@ main() {
       delete_execution "$2"
       ;;
     --lint)
-      require_submit_prereqs
-      lint_sources
+      lint_workflow
       ;;
     -h|--help|help|"")
       usage

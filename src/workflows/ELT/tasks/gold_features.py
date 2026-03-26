@@ -3,16 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from flytekit import Resources, task
 from flytekitplugins.spark import Spark
-from pyspark.sql import DataFrame, Window, functions as F
+from pyspark.sql import DataFrame, Window
+from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from workflows.ELT.tasks.bronze_ingest import (
@@ -21,7 +21,6 @@ from workflows.ELT.tasks.bronze_ingest import (
     GOLD_NAMESPACE,
     GOLD_TRAINING_TABLE,
     ICEBERG_TARGET_FILE_SIZE_BYTES,
-    SILVER_ROWS_PER_PARTITION,
     TASK_IMAGE,
     build_hadoop_conf,
     build_spark_conf,

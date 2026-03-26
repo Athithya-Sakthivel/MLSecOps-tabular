@@ -9,15 +9,14 @@ from typing import Sequence
 
 from flytekit import Resources, task
 from flytekitplugins.spark import Spark
-from pyspark.sql import DataFrame, functions as F
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from workflows.ELT.tasks.bronze_ingest import (
-    BRONZE_TAXI_ZONE_TABLE,
     CATALOG_NAME,
     ICEBERG_TARGET_FILE_SIZE_BYTES,
     SILVER_NAMESPACE,
-    SILVER_ROWS_PER_PARTITION,
     SILVER_TRIPS_TABLE,
     TASK_IMAGE,
     BronzeIngestResult,
@@ -29,6 +28,8 @@ from workflows.ELT.tasks.bronze_ingest import (
     qualify_table_id,
     table_exists,
 )
+
+SILVER_ROWS_PER_PARTITION = int(os.environ.get("SILVER_ROWS_PER_PARTITION", "50000"))
 
 LOG = logging.getLogger("elt_silver_transform")
 LOG.setLevel(logging.INFO)

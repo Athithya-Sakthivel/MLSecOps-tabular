@@ -15,7 +15,8 @@ from typing import Iterable, Sequence, Tuple
 
 from flytekit import Resources, current_context, task
 from flytekitplugins.spark import Spark
-from pyspark.sql import DataFrame, SparkSession, functions as F
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
 LOG = logging.getLogger("elt_bronze_ingest")
 LOG.setLevel(logging.INFO)

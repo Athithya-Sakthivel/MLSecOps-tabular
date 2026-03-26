@@ -14,18 +14,14 @@ from flytekitplugins.spark import Spark
 from pyspark.sql import SparkSession
 
 from workflows.ELT.tasks.bronze_ingest import (
-    BRONZE_NAMESPACE,
     BRONZE_TAXI_ZONE_TABLE,
     BRONZE_TRIPS_TABLE,
     CATALOG_NAME,
     GOLD_CONTRACT_TABLE,
-    GOLD_NAMESPACE,
     GOLD_TRAINING_TABLE,
     ICEBERG_EXPIRE_DAYS,
     ICEBERG_ORPHAN_DAYS,
     ICEBERG_RETAIN_LAST,
-    MAINTENANCE_REWRITE_DAYS,
-    SILVER_NAMESPACE,
     SILVER_TRIPS_TABLE,
     TASK_IMAGE,
     build_hadoop_conf,
