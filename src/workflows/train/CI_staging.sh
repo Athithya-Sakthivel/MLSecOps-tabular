@@ -4,8 +4,9 @@ set -euo pipefail
 : "${GIT_PAT:?GIT_PAT is required}"
 
 GHCR_USER="${GHCR_USER:-athithya-sakthivel}"
-IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y-%m-%d)-$(git rev-parse --short HEAD)}"
-PUSH_IMAGE="${PUSH_IMAGE:-false}"
+IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y-%m-%d-%H-%M)-$(git rev-parse --short HEAD)}"
+
+PUSH_IMAGE="${PUSH_IMAGE:-true}"
 
 TRAIN_TASK_IMAGE="ghcr.io/${GHCR_USER}/flyte-train-task:${IMAGE_TAG}"
 
