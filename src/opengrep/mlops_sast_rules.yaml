@@ -1,10 +1,4 @@
 rules:
-  - id: dockerfile-last-user-is-root
-    message: "Avoid ending a Dockerfile as root."
-    languages: [dockerfile]
-    severity: WARNING
-    pattern: USER root
-
   - id: python-unsafe-pickle-and-joblib-load
     message: "Avoid loading pickle/joblib data from untrusted sources."
     languages: [python]
