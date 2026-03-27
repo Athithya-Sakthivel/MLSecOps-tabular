@@ -400,98 +400,42 @@ EOF
   log "rendered serviceaccount -> ${sa_out}"
 }
 
-render_deployment_service_pdb(){
-  local out="${MANIFEST_DIR}/deployment.yaml"
+render_deployment_service_pdb() {
   local svc="${MANIFEST_DIR}/service.yaml"
   local pdb="${MANIFEST_DIR}/pdb.yaml"
   local extra_env=""
-  local extra_volume_mounts=""
-  local extra_volumes=""
 
   case "${STORAGE_PROVIDER}" in
     aws)
       if [[ "${USE_IAM}" != "true" ]]; then
-        extra_env=$(cat <<EOT
-        - name: GRAVITINO_S3_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: ${SECRET_NAME}
-              key: AWS_ACCESS_KEY_ID
-        - name: GRAVITINO_S3_SECRET_KEY
-          valueFrom:
-            secretKeyRef:
-              name: ${SECRET_NAME}
-              key: AWS_SECRET_ACCESS_KEY
-        - name: GRAVITINO_S3_REGION
-          value: "${AWS_REGION}"
-        - name: GRAVITINO_S3_ENDPOINT
-          value: "${S3_ENDPOINT}"
-        - name: GRAVITINO_S3_PATH_STYLE_ACCESS
-          value: "${S3_PATH_STYLE_ACCESS}"
-EOT
-)
-      else
-        extra_env=$(cat <<EOT
-        - name: GRAVITINO_S3_REGION
-          value: "${AWS_REGION}"
-        - name: GRAVITINO_S3_ENDPOINT
-          value: "${S3_ENDPOINT}"
-        - name: GRAVITINO_S3_PATH_STYLE_ACCESS
-          value: "${S3_PATH_STYLE_ACCESS}"
-EOT
-)
-      fi
-      ;;
-    gcp)
-      if [[ "${USE_IAM}" != "true" ]]; then
-        extra_env=$(cat <<EOT
-        - name: GRAVITINO_GCS_SERVICE_ACCOUNT_FILE
-          value: "${GCP_MOUNT_DIR}/${GCP_SECRET_FILE_NAME}"
-EOT
-)
-        extra_volume_mounts=$(cat <<EOF
-        - name: gcp-sa
-          mountPath: ${GCP_MOUNT_DIR}
-          readOnly: true
+        extra_env=$(cat <<EOF
+            - name: GRAVITINO_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${SECRET_NAME}
+                  key: AWS_ACCESS_KEY_ID
+            - name: GRAVITINO_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ${SECRET_NAME}
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: GRAVITINO_S3_REGION
+              value: "${AWS_REGION}"
+            - name: GRAVITINO_S3_ENDPOINT
+              value: "${S3_ENDPOINT}"
+            - name: GRAVITINO_S3_PATH_STYLE_ACCESS
+              value: "${S3_PATH_STYLE_ACCESS}"
 EOF
 )
-        extra_volumes=$(cat <<EOF
-      - name: gcp-sa
-        secret:
-          secretName: ${SECRET_NAME}
-          items:
-          - key: ${GCP_SECRET_FILE_NAME}
-            path: ${GCP_SECRET_FILE_NAME}
-EOF
-)
-      fi
-      ;;
-    azure)
-      if [[ "${USE_IAM}" != "true" ]]; then
-        extra_env=$(cat <<EOT
-        - name: GRAVITINO_AZURE_STORAGE_ACCOUNT_NAME
-          valueFrom:
-            secretKeyRef:
-              name: ${SECRET_NAME}
-              key: AZURE_STORAGE_ACCOUNT
-        - name: GRAVITINO_AZURE_STORAGE_ACCOUNT_KEY
-          valueFrom:
-            secretKeyRef:
-              name: ${SECRET_NAME}
-              key: AZURE_STORAGE_KEY
-        - name: GRAVITINO_AZURE_TENANT_ID
-          value: "${AZURE_TENANT_ID}"
-        - name: GRAVITINO_AZURE_CLIENT_ID
-          value: "${AZURE_CLIENT_ID}"
-EOT
-)
       else
-        extra_env=$(cat <<EOT
-        - name: GRAVITINO_AZURE_TENANT_ID
-          value: "${AZURE_TENANT_ID}"
-        - name: GRAVITINO_AZURE_CLIENT_ID
-          value: "${AZURE_CLIENT_ID}"
-EOT
+        extra_env=$(cat <<EOF
+            - name: GRAVITINO_S3_REGION
+              value: "${AWS_REGION}"
+            - name: GRAVITINO_S3_ENDPOINT
+              value: "${S3_ENDPOINT}"
+            - name: GRAVITINO_S3_PATH_STYLE_ACCESS
+              value: "${S3_PATH_STYLE_ACCESS}"
+EOF
 )
       fi
       ;;
@@ -500,11 +444,7 @@ EOT
       ;;
   esac
 
-  local pg_secret
-  pg_secret="$(find_pg_secret_name)"
-  [[ -n "${pg_secret}" ]] || fatal "CNPG app secret not found; expected label selector '${PG_APP_SECRET_LABEL}'"
-
-  cat > "${out}" <<EOF
+  cat > ${MANIFEST_DIR}/deployment.yaml <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -530,120 +470,130 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
-        fsGroup: 0
+        fsGroup: 1001
         fsGroupChangePolicy: OnRootMismatch
       initContainers:
-      - name: copy-config
-        image: busybox:1.36
-        imagePullPolicy: IfNotPresent
-        command:
-        - sh
-        - -c
-        - cp -a /config/. /conf/ && chmod -R ug+rwX /conf || true
-        volumeMounts:
-        - name: config
-          mountPath: /config
-          readOnly: true
-        - name: conf
-          mountPath: /conf
+        - name: copy-config
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - cp -a /config/. /conf/ && chmod -R ug+rwX /conf || true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: conf
+              mountPath: /conf
+            - name: tmp
+              mountPath: /tmp
       containers:
-      - name: grav
-        image: ${IMAGE}
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: ${PORT}
-        env:
-        - name: GRAVITINO_VERSION
-          value: "${GRAVITINO_VERSION}"
-        - name: GRAVITINO_ICEBERG_REST_HTTP_PORT
-          value: "${PORT}"
-        - name: GRAVITINO_IO_IMPL
-          value: "${IO_IMPL}"
-        - name: GRAVITINO_CATALOG_BACKEND
-          value: "jdbc"
-        - name: GRAVITINO_URI
-          value: "jdbc:postgresql://${PG_POOLER_HOST}:${PG_POOLER_PORT}/${PG_DB}"
-        - name: GRAVITINO_WAREHOUSE
-          value: "${WAREHOUSE}"
-        - name: GRAVITINO_JDBC_DRIVER
-          value: "org.postgresql.Driver"
-        - name: GRAVITINO_JDBC_USER
-          valueFrom:
-            secretKeyRef:
-              name: ${pg_secret}
-              key: username
-        - name: GRAVITINO_JDBC_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: ${pg_secret}
-              key: password
+        - name: grav
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: ${PORT}
+          env:
+            - name: GRAVITINO_VERSION
+              value: "${GRAVITINO_VERSION}"
+            - name: GRAVITINO_ICEBERG_REST_HTTP_PORT
+              value: "${PORT}"
+            - name: GRAVITINO_IO_IMPL
+              value: "${IO_IMPL}"
+            - name: GRAVITINO_CATALOG_BACKEND
+              value: "jdbc"
+            - name: GRAVITINO_URI
+              value: "jdbc:postgresql://${PG_POOLER_HOST}:${PG_POOLER_PORT}/${PG_DB}"
+            - name: GRAVITINO_WAREHOUSE
+              value: "${WAREHOUSE}"
+            - name: GRAVITINO_JDBC_DRIVER
+              value: "org.postgresql.Driver"
+            - name: GRAVITINO_JDBC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ${pg_secret}
+                  key: username
+            - name: GRAVITINO_JDBC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${pg_secret}
+                  key: password
 ${extra_env}
-        - name: ICEBERG_REST_AUTH_TYPE
-          value: "basic"
-        - name: ICEBERG_REST_USER
-          valueFrom:
-            secretKeyRef:
-              name: ${REST_SECRET_NAME}
-              key: user
-        - name: ICEBERG_REST_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: ${REST_SECRET_NAME}
-              key: password
-        resources:
-          requests:
-            cpu: "${CPU_REQUEST}"
-            memory: "${MEM_REQUEST}"
-          limits:
-            cpu: "${CPU_LIMIT}"
-            memory: "${MEM_LIMIT}"
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          runAsNonRoot: true
-          runAsUser: 1001
-          runAsGroup: 0
-          capabilities:
-            drop: ["ALL"]
-        startupProbe:
-          tcpSocket:
-            port: ${PORT}
-          initialDelaySeconds: 15
-          periodSeconds: 5
-          failureThreshold: 120
-        readinessProbe:
-          tcpSocket:
-            port: ${PORT}
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          timeoutSeconds: 2
-          failureThreshold: 12
-        livenessProbe:
-          tcpSocket:
-            port: ${PORT}
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 2
-          failureThreshold: 6
-        volumeMounts:
-        - name: conf
-          mountPath: /root/gravitino-iceberg-rest-server/conf
-          readOnly: false
-        - name: logs
-          mountPath: /root/gravitino-iceberg-rest-server/logs
-        - name: tmp
-          mountPath: /tmp
+            - name: ICEBERG_REST_AUTH_TYPE
+              value: "basic"
+            - name: ICEBERG_REST_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ${REST_SECRET_NAME}
+                  key: user
+            - name: ICEBERG_REST_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${REST_SECRET_NAME}
+                  key: password
+          resources:
+            requests:
+              cpu: "${CPU_REQUEST}"
+              memory: "${MEM_REQUEST}"
+            limits:
+              cpu: "${CPU_LIMIT}"
+              memory: "${MEM_LIMIT}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            tcpSocket:
+              port: ${PORT}
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            tcpSocket:
+              port: ${PORT}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: ${PORT}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          volumeMounts:
+            - name: conf
+              mountPath: /root/gravitino-iceberg-rest-server/conf
+              readOnly: false
+            - name: logs
+              mountPath: /root/gravitino-iceberg-rest-server/logs
+            - name: tmp
+              mountPath: /tmp
 ${extra_volume_mounts}
       volumes:
-      - name: config
-        configMap:
-          name: ${CONFIGMAP_NAME}
-      - name: conf
-        emptyDir: {}
-      - name: logs
-        emptyDir: {}
-      - name: tmp
-        emptyDir: {}
+        - name: config
+          configMap:
+            name: ${CONFIGMAP_NAME}
+        - name: conf
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 ${extra_volumes}
 EOF
 
@@ -658,9 +608,9 @@ spec:
   selector:
     app: ${DEPLOYMENT_NAME}
   ports:
-  - name: http
-    port: ${PORT}
-    targetPort: ${PORT}
+    - name: http
+      port: ${PORT}
+      targetPort: ${PORT}
 EOF
 
   cat > "${pdb}" <<EOF

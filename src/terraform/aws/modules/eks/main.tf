@@ -141,8 +141,93 @@ variable "launch_template_version" {
   default     = ""
 }
 
+data "aws_partition" "current" {}
+data "aws_caller_identity" "current" {}
+
 locals {
-  merged_tags = merge({ ManagedBy = "agentops-serviceautomation", Name = var.cluster_name, Environment = lookup(var.tags, "Environment", "") }, var.tags)
+  merged_tags = merge(
+    {
+      ManagedBy   = "agentops-serviceautomation"
+      Name        = var.cluster_name
+      Environment = lookup(var.tags, "Environment", "")
+    },
+    var.tags
+  )
+
+  root_principal_arn = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"
+}
+
+data "aws_iam_policy_document" "eks_secrets_encryption" {
+  statement {
+    sid     = "EnableAccountRootPermissions"
+    effect  = "Allow"
+    actions = ["kms:*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = [local.root_principal_arn]
+    }
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowEKSClusterRoleToUseKey"
+    effect = "Allow"
+
+    actions = [
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*"
+    ]
+
+    principals {
+      type        = "AWS"
+      identifiers = [var.cluster_role_arn]
+    }
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowEKSClusterRoleToManageGrants"
+    effect = "Allow"
+
+    actions = [
+      "kms:CreateGrant",
+      "kms:ListGrants",
+      "kms:RevokeGrant"
+    ]
+
+    principals {
+      type        = "AWS"
+      identifiers = [var.cluster_role_arn]
+    }
+
+    resources = ["*"]
+
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
+    }
+  }
+}
+
+resource "aws_kms_key" "eks_secrets" {
+  description             = "EKS secrets encryption key for ${var.cluster_name}"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.eks_secrets_encryption.json
+
+  tags = local.merged_tags
+}
+
+resource "aws_kms_alias" "eks_secrets" {
+  name          = "alias/${var.cluster_name}-eks-secrets"
+  target_key_id  = aws_kms_key.eks_secrets.key_id
 }
 
 #########################
@@ -157,6 +242,14 @@ resource "aws_eks_cluster" "this" {
 
     endpoint_public_access  = false
     endpoint_private_access = true
+  }
+
+  encryption_config {
+    resources = ["secrets"]
+
+    provider {
+      key_arn = aws_kms_key.eks_secrets.arn
+    }
   }
 
   enabled_cluster_log_types = var.enabled_cluster_log_types
@@ -298,4 +391,9 @@ output "oidc_provider_arn" {
 output "oidc_provider_issuer" {
   description = "OIDC issuer host/path without https://"
   value       = replace(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")
+}
+
+output "secrets_encryption_kms_key_arn" {
+  description = "KMS key ARN used for EKS secrets encryption"
+  value       = aws_kms_key.eks_secrets.arn
 }

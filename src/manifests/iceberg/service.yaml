@@ -8,6 +8,6 @@ spec:
   selector:
     app: iceberg-rest
   ports:
-  - name: http
-    port: 9001
-    targetPort: 9001
+    - name: http
+      port: 9001
+      targetPort: 9001

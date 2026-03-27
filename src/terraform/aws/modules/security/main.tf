@@ -37,10 +37,17 @@ variable "tags" {
 }
 
 locals {
-  env_tag         = lookup(var.tags, "Environment", "prod")
-  merged_tags     = merge({ "Name" = var.name_prefix, "Environment" = local.env_tag, "ManagedBy" = "agentops-serviceautomation" }, var.tags)
-  ipv6_blocks     = (var.enable_ipv6 && var.ipv6_cidr_block != "") ? [var.ipv6_cidr_block] : []
-  any_ipv6_egress = var.enable_ipv6 ? ["::/0"] : []
+  env_tag     = lookup(var.tags, "Environment", "prod")
+  merged_tags = merge(
+    {
+      "Name"        = var.name_prefix
+      "Environment" = local.env_tag
+      "ManagedBy"   = "agentops-serviceautomation"
+    },
+    var.tags
+  )
+
+  ipv6_blocks = (var.enable_ipv6 && var.ipv6_cidr_block != "") ? [var.ipv6_cidr_block] : []
 }
 
 ########################
@@ -62,13 +69,15 @@ resource "aws_security_group" "node" {
     ipv6_cidr_blocks = local.ipv6_blocks
   }
 
+  # Restrict egress to the VPC only. This keeps private cluster access working
+  # while removing unrestricted internet egress.
   egress {
-    description      = "Allow all outbound (AWS APIs, VPC endpoints, internet egress)."
+    description      = "Allow outbound traffic only within the VPC CIDR"
     from_port        = 0
     to_port          = 0
     protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = local.any_ipv6_egress
+    cidr_blocks      = [var.vpc_cidr]
+    ipv6_cidr_blocks = local.ipv6_blocks
   }
 }
 
@@ -100,13 +109,14 @@ resource "aws_security_group" "vpc_endpoints" {
     ipv6_cidr_blocks = local.ipv6_blocks
   }
 
+  # Restrict egress to the VPC only; no unrestricted public egress.
   egress {
-    description      = "Allow all outbound from endpoint ENIs"
+    description      = "Allow outbound traffic only within the VPC CIDR"
     from_port        = 0
     to_port          = 0
     protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = local.any_ipv6_egress
+    cidr_blocks      = [var.vpc_cidr]
+    ipv6_cidr_blocks = local.ipv6_blocks
   }
 }
 
