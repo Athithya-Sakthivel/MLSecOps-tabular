@@ -1,0 +1,100 @@
+name: full_repo_scan
+
+on:
+  push:
+    branches:
+      - "**"
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-repo-scan-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  SCANNER_IMAGE: ghcr.io/athithya-sakthivel/trivy-0.69.3-gitleaks-8.30.1-opengrep-1.16.5@sha256:2d19bd7b418692a20ae57b24620da3af648878a66d582022c0721512fff1b5e2
+
+jobs:
+  scan:
+    name: full-repo-security-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Restore Trivy cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Ensure cache directory exists
+        run: mkdir -p "$HOME/.cache/trivy"
+
+      - name: Run OpenGrep, Gitleaks, and Trivy
+        run: |
+          set -euo pipefail
+
+          REPO_ROOT="$GITHUB_WORKSPACE"
+          RULE_FILE="$REPO_ROOT/src/opengrep/mlops_sast_rules.yaml"
+
+          if [[ ! -s "$RULE_FILE" ]]; then
+            echo "::error::Missing or empty OpenGrep rules file: $RULE_FILE"
+            exit 1
+          fi
+
+          docker run --rm \
+            -e HOME=/home/appuser \
+            -v "$REPO_ROOT:/workspace" \
+            -v "$HOME/.cache/trivy:/home/appuser/.cache/trivy" \
+            -w /workspace \
+            "$SCANNER_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              echo "=== OpenGrep (SAST) ==="
+              opengrep scan \
+                --config /workspace/src/opengrep/mlops_sast_rules.yaml \
+                --error \
+                /workspace
+
+              echo "=== Gitleaks (all commits) ==="
+              if [[ -s /workspace/.gitleaks.toml ]]; then
+                gitleaks git \
+                  --config /workspace/.gitleaks.toml \
+                  --log-opts="--all" \
+                  --no-banner \
+                  --redact \
+                  --exit-code 1
+              else
+                gitleaks git \
+                  --log-opts="--all" \
+                  --no-banner \
+                  --redact \
+                  --exit-code 1
+              fi
+
+              echo "=== Trivy (filesystem) ==="
+              trivy fs \
+                --scanners vuln,misconfig \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                --skip-dirs .git \
+                --skip-dirs src/opengrep \
+                --exit-code 1 \
+                /workspace
+            '
