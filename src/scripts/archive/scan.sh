@@ -2,7 +2,7 @@
 # works in CI only not in devcontianer
 set -euo pipefail
 
-IMAGE="ghcr.io/athithya-sakthivel/trivy-0.69.3-gitleaks-8.30.1-opengrep-1.16.5@sha256:2d19bd7b418692a20ae57b24620da3af648878a66d582022c0721512fff1b5e2"
+IMAGE="ghcr.io/athithya-sakthivel/trivy-0.69.3-gitleaks-8.30.1-opengrep-1.16.5@sha256:e3b9e8aa7f32d1ef4c2318c63ce6e8786ea8842b50c1ff6fe6eeb956710da928"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 RULE_FILE="$REPO_ROOT/src/opengrep/mlops_sast_rules.yaml"
 
