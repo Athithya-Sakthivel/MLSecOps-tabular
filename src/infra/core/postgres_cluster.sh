@@ -274,21 +274,24 @@ $(for db in "${ADDITIONAL_DBS[@]}"; do printf "        - CREATE DATABASE %s OWNE
 EOF
   log "wrote ${CLUSTER_FILE}"
 }
-
 render_pooler_manifest(){
   log "rendering pooler manifest -> ${POOLER_FILE}"
   mkdir -p "$(dirname "${POOLER_FILE}")"
+
   cat > "${POOLER_FILE}" <<EOF
 apiVersion: postgresql.cnpg.io/v1
 kind: Pooler
 metadata:
   name: ${POOLER_NAME}
   namespace: ${TARGET_NS}
+
 spec:
   cluster:
     name: ${CLUSTER_NAME}
+
   instances: ${POOLER_INSTANCES}
   type: rw
+
   pgbouncer:
     poolMode: transaction
     parameters:
@@ -297,10 +300,18 @@ spec:
       min_pool_size: "5"
       reserve_pool_size: "10"
       server_idle_timeout: "600"
+
   template:
     spec:
+      securityContext:
+        runAsNonRoot: true
+
       containers:
       - name: pgbouncer
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+
         resources:
           requests:
             cpu: ${POOLER_CPU_REQUEST}
@@ -309,6 +320,7 @@ spec:
             cpu: ${POOLER_CPU_LIMIT}
             memory: ${POOLER_MEM_LIMIT}
 EOF
+
   log "wrote ${POOLER_FILE}"
 }
 
