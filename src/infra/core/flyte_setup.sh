@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstraps a full Flyte deployment on Kubernetes using Helm with deterministic configuration.
+# Bootstraps a full Flyte deployment with spark plugin on Kubernetes using Helm with deterministic configuration.
 # Discovers CNPG Postgres credentials, ensures required databases exist, and wires Flyte services to them.
 # Creates Kubernetes Secrets for DB password and, when USE_IAM=false, AWS credentials for task pods in execution namespaces.
 # Dynamically renders a storage-aware Helm values file (S3/GCS/Azure) and applies it via `helm upgrade --install`.
@@ -61,8 +61,6 @@ FLYTE_EXTERNAL_EVENTS_ENABLED="${FLYTE_EXTERNAL_EVENTS_ENABLED:-false}"
 FLYTE_CLOUD_EVENTS_ENABLED="${FLYTE_CLOUD_EVENTS_ENABLED:-false}"
 FLYTE_CONNECTOR_ENABLED="${FLYTE_CONNECTOR_ENABLED:-false}"
 FLYTE_SPARK_OPERATOR_ENABLED="${FLYTE_SPARK_OPERATOR_ENABLED:-true}"
-FLYTE_DASK_OPERATOR_ENABLED="${FLYTE_DASK_OPERATOR_ENABLED:-false}"
-FLYTE_DATABRICKS_ENABLED="${FLYTE_DATABRICKS_ENABLED:-false}"
 
 CHART_REPO_NAME="${CHART_REPO_NAME:-flyte}"
 CHART_REPO_URL="${CHART_REPO_URL:-https://flyteorg.github.io/flyte}"
@@ -82,6 +80,9 @@ FLYTE_TASK_NAMESPACES="${FLYTE_TASK_NAMESPACES:-flytesnacks-development}"
 TASK_AWS_SECRET_NAME="${TASK_AWS_SECRET_NAME:-flyte-aws-credentials}"
 
 mkdir -p "${MANIFEST_DIR}"
+
+FLYTE_DASK_OPERATOR_ENABLED="${FLYTE_DASK_OPERATOR_ENABLED:-false}"
+FLYTE_DATABRICKS_ENABLED="${FLYTE_DATABRICKS_ENABLED:-false}"
 
 log() { printf '[%s] [flyte] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 fatal() { printf '[%s] [flyte][FATAL] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
@@ -375,6 +376,61 @@ EOF
   fi
 }
 
+render_sparkoperator_block() {
+  local provider="$1"
+  local enabled
+  enabled="$(yaml_bool "${FLYTE_SPARK_OPERATOR_ENABLED:-false}")"
+
+  cat <<EOF
+sparkoperator:
+  enabled: ${enabled}
+EOF
+}
+
+render_spark_runtime_block() {
+  local provider="$1"
+
+  case "${provider}" in
+    aws)
+      cat <<EOF
+plugins:
+  spark:
+    spark-config-default:
+      - spark.hadoop.fs.s3a.aws.credentials.provider: "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+      - spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version: "2"
+      - spark.kubernetes.allocation.batch.size: "50"
+      - spark.hadoop.fs.s3a.acl.default: "BucketOwnerFullControl"
+      - spark.hadoop.fs.s3n.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+      - spark.hadoop.fs.AbstractFileSystem.s3n.impl: "org.apache.hadoop.fs.s3a.S3A"
+      - spark.hadoop.fs.s3.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+      - spark.hadoop.fs.AbstractFileSystem.s3.impl: "org.apache.hadoop.fs.s3a.S3A"
+      - spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+      - spark.hadoop.fs.AbstractFileSystem.s3a.impl: "org.apache.hadoop.fs.s3a.S3A"
+      - spark.hadoop.fs.s3a.multipart.threshold: "536870912"
+      - spark.blacklist.enabled: "true"
+      - spark.blacklist.timeout: "5m"
+      - spark.task.maxfailures: "8"
+EOF
+      ;;
+    gcs)
+      cat <<EOF
+plugins:
+  spark:
+    spark-config-default: []
+EOF
+      ;;
+    azure)
+      cat <<EOF
+plugins:
+  spark:
+    spark-config-default: []
+EOF
+      ;;
+    *)
+      fatal "unsupported storage provider ${provider}"
+      ;;
+  esac
+}
 render_values_file() {
   local provider="$1"
   local admin_sa scheduler_sa datacatalog_sa propeller_sa console_sa webhook_sa raw_prefix remote_scheme
@@ -428,7 +484,7 @@ ${datacatalog_sa}
     type: ClusterIP
 
 flyteconnector:
-  enabled: $(yaml_bool "${FLYTE_CONNECTOR_ENABLED}")
+  enabled: $(yaml_bool "${FLYTE_CONNECTOR_ENABLED:-false}")
 
 flytepropeller:
   enabled: true
@@ -458,9 +514,9 @@ common:
     secretManifest: {}
   ingress:
     ingressClassName: "${FLYTE_INGRESS_CLASS_NAME}"
-    enabled: $(yaml_bool "${FLYTE_INGRESS_ENABLED}")
+    enabled: $(yaml_bool "${FLYTE_INGRESS_ENABLED:-false}")
     webpackHMR: false
-    separateGrpcIngress: $(yaml_bool "${FLYTE_SEPARATE_GRPC_INGRESS}")
+    separateGrpcIngress: $(yaml_bool "${FLYTE_SEPARATE_GRPC_INGRESS:-false}")
     separateGrpcIngressAnnotations: {}
     annotations: {}
     albSSLRedirect: false
@@ -532,31 +588,31 @@ configmap:
         logs:
           kubernetes-enabled: true
           cloudwatch-enabled: false
-  $(render_k8s_block "${provider}" | sed 's/^/  /')
+$(render_k8s_block "${provider}" | sed 's/^/    /')
+$(render_spark_runtime_block "${provider}" | sed 's/^/    /')
 
 workflow_scheduler:
-  enabled: $(yaml_bool "${FLYTE_WORKFLOW_SCHEDULER_ENABLED}")
+  enabled: $(yaml_bool "${FLYTE_WORKFLOW_SCHEDULER_ENABLED:-false}")
 
 workflow_notifications:
-  enabled: $(yaml_bool "${FLYTE_WORKFLOW_NOTIFICATIONS_ENABLED}")
+  enabled: $(yaml_bool "${FLYTE_WORKFLOW_NOTIFICATIONS_ENABLED:-false}")
 
 external_events:
-  enable: $(yaml_bool "${FLYTE_EXTERNAL_EVENTS_ENABLED}")
+  enable: $(yaml_bool "${FLYTE_EXTERNAL_EVENTS_ENABLED:-false}")
 
 cloud_events:
-  enable: $(yaml_bool "${FLYTE_CLOUD_EVENTS_ENABLED}")
+  enable: $(yaml_bool "${FLYTE_CLOUD_EVENTS_ENABLED:-false}")
 
 cluster_resource_manager:
-  enabled: $(yaml_bool "${FLYTE_CLUSTER_RESOURCE_MANAGER_ENABLED}")
+  enabled: $(yaml_bool "${FLYTE_CLUSTER_RESOURCE_MANAGER_ENABLED:-true}")
 
-sparkoperator:
-  enabled: $(yaml_bool "${FLYTE_SPARK_OPERATOR_ENABLED}")
+$(render_sparkoperator_block "${provider}")
 
 daskoperator:
-  enabled: $(yaml_bool "${FLYTE_DASK_OPERATOR_ENABLED}")
+  enabled: $(yaml_bool "${FLYTE_DASK_OPERATOR_ENABLED:-false}")
 
 databricks:
-  enabled: $(yaml_bool "${FLYTE_DATABRICKS_ENABLED}")
+  enabled: $(yaml_bool "${FLYTE_DATABRICKS_ENABLED:-false}")
 EOF
 }
 
@@ -570,8 +626,13 @@ require_prereqs() {
 }
 
 ensure_release_namespace() {
-  kubectl create namespace "${TARGET_NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl label namespace "${TARGET_NS}" app.kubernetes.io/part-of=flyte --overwrite >/dev/null 2>&1 || true
+  if ! kubectl get namespace "${TARGET_NS}" >/dev/null 2>&1; then
+    kubectl create namespace "${TARGET_NS}" >/dev/null
+  fi
+
+  kubectl label namespace "${TARGET_NS}" \
+    app.kubernetes.io/part-of=flyte \
+    --overwrite >/dev/null 2>&1 || true
 }
 
 wait_for_rollouts() {

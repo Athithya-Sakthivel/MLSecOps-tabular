@@ -14,7 +14,7 @@
 
 set -Eeuo pipefail
 
-export ELT_TASK_IMAGE="ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-27-04-32--8631391"
+export ELT_TASK_IMAGE="docker pull ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-27-05-36--625c128"
 
 REMOTE_PROJECT="${REMOTE_PROJECT:-flytesnacks}"
 REMOTE_DOMAIN="${REMOTE_DOMAIN:-development}"
