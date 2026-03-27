@@ -112,7 +112,8 @@ ipython_config.py
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
 #uv.lock
-src/scripts/archive/cnpg-1.28.1.yaml
+
+
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
@@ -177,7 +178,8 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
+cnpg-1.28.1.yaml
+rc/scripts/archive/cnpg-1.28.1.yaml
 # Pyre type checker
 .pyre/
 
