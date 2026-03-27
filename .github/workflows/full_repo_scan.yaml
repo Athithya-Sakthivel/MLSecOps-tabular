@@ -62,30 +62,33 @@ jobs:
             -v "$REPO_ROOT:/workspace" \
             -v "$HOME/.cache/trivy:/home/appuser/.cache/trivy" \
             -w /workspace \
+            --entrypoint /bin/sh \
             "$SCANNER_IMAGE" \
-            bash -lc '
-              set -euo pipefail
+            -ec '
+              set -eu
 
               echo "=== OpenGrep (SAST) ==="
               opengrep scan \
                 --config /workspace/src/opengrep/mlops_sast_rules.yaml \
                 --error \
-                /workspace
+                .
 
               echo "=== Gitleaks (all commits) ==="
-              if [[ -s /workspace/.gitleaks.toml ]]; then
+              if [ -s /workspace/.gitleaks.toml ]; then
                 gitleaks git \
                   --config /workspace/.gitleaks.toml \
-                  --log-opts="--all" \
+                  --log-opts="--full-history --all" \
                   --no-banner \
                   --redact \
-                  --exit-code 1
+                  --exit-code 1 \
+                  .
               else
                 gitleaks git \
-                  --log-opts="--all" \
+                  --log-opts="--full-history --all" \
                   --no-banner \
                   --redact \
-                  --exit-code 1
+                  --exit-code 1 \
+                  .
               fi
 
               echo "=== Trivy (filesystem) ==="
@@ -96,5 +99,5 @@ jobs:
                 --skip-dirs .git \
                 --skip-dirs src/opengrep \
                 --exit-code 1 \
-                /workspace
+                .
             '
