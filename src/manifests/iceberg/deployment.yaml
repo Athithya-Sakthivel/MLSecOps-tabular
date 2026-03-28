@@ -35,12 +35,23 @@ spec:
             - sh
             - -c
             - cp -a /config/. /conf/ && chmod -R ug+rwX /conf || true
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 0
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: config
               mountPath: /config
               readOnly: true
             - name: conf
               mountPath: /conf
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: grav
           image: ghcr.io/athithya-sakthivel/iceberg-rest-gravitino-postgres@sha256:bb2ac1c0328a94b65834aa0bae9e863baf8aaee7557810e7b79c71f3537d13ea

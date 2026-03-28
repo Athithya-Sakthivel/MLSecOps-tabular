@@ -5,6 +5,7 @@
 # 4. Waits for the service to serve /iceberg/v1/config before creating a test namespace.
 # 5. Disables HPA by default to avoid metrics-server noise on kind clusters.
 # 6. Keeps the container hardened, but restores writable conf/logs/tmp paths the image needs.
+# 7. Keeps initContainer hardened and explicitly read-only on its root filesystem for scanner compliance.
 
 set -Eeuo pipefail
 
@@ -90,6 +91,11 @@ mkdir -p "${MANIFEST_DIR}"
 log(){ printf '[%s] [iceberg] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 fatal(){ printf '[%s] [iceberg][FATAL] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; exit 1; }
 require_bin(){ command -v "$1" >/dev/null 2>&1 || fatal "$1 required in PATH"; }
+
+indent_block() {
+  local n="$1"
+  sed "s/^/$(printf '%*s' "$n")/"
+}
 
 trap 'rc=$?; echo; echo "[DIAG] exit_code=$rc"; echo "[DIAG] kubectl context: $(kubectl config current-context 2>/dev/null || true)"; echo "[DIAG] pods in ns ${TARGET_NS}:"; kubectl -n "${TARGET_NS}" get pods -o wide || true; echo "[DIAG] svc in ns ${TARGET_NS}:"; kubectl -n "${TARGET_NS}" get svc -o wide || true; echo "[DIAG] events (last 200):"; kubectl get events -A --sort-by=.lastTimestamp | tail -n 200 || true; exit $rc' ERR
 
@@ -413,32 +419,32 @@ render_deployment_service_pdb(){
     aws)
       if [[ "${USE_IAM}" != "true" ]]; then
         extra_env=$(cat <<EOF
-            - name: GRAVITINO_S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: ${SECRET_NAME}
-                  key: AWS_ACCESS_KEY_ID
-            - name: GRAVITINO_S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: ${SECRET_NAME}
-                  key: AWS_SECRET_ACCESS_KEY
-            - name: GRAVITINO_S3_REGION
-              value: "${AWS_REGION}"
-            - name: GRAVITINO_S3_ENDPOINT
-              value: "${S3_ENDPOINT}"
-            - name: GRAVITINO_S3_PATH_STYLE_ACCESS
-              value: "${S3_PATH_STYLE_ACCESS}"
+- name: GRAVITINO_S3_ACCESS_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ${SECRET_NAME}
+      key: AWS_ACCESS_KEY_ID
+- name: GRAVITINO_S3_SECRET_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ${SECRET_NAME}
+      key: AWS_SECRET_ACCESS_KEY
+- name: GRAVITINO_S3_REGION
+  value: "${AWS_REGION}"
+- name: GRAVITINO_S3_ENDPOINT
+  value: "${S3_ENDPOINT}"
+- name: GRAVITINO_S3_PATH_STYLE_ACCESS
+  value: "${S3_PATH_STYLE_ACCESS}"
 EOF
 )
       else
         extra_env=$(cat <<EOF
-            - name: GRAVITINO_S3_REGION
-              value: "${AWS_REGION}"
-            - name: GRAVITINO_S3_ENDPOINT
-              value: "${S3_ENDPOINT}"
-            - name: GRAVITINO_S3_PATH_STYLE_ACCESS
-              value: "${S3_PATH_STYLE_ACCESS}"
+- name: GRAVITINO_S3_REGION
+  value: "${AWS_REGION}"
+- name: GRAVITINO_S3_ENDPOINT
+  value: "${S3_ENDPOINT}"
+- name: GRAVITINO_S3_PATH_STYLE_ACCESS
+  value: "${S3_PATH_STYLE_ACCESS}"
 EOF
 )
       fi
@@ -446,23 +452,23 @@ EOF
     gcp)
       if [[ "${USE_IAM}" != "true" ]]; then
         extra_env=$(cat <<EOF
-            - name: GRAVITINO_GCS_SERVICE_ACCOUNT_FILE
-              value: "${GCP_MOUNT_DIR}/${GCP_SECRET_FILE_NAME}"
+- name: GRAVITINO_GCS_SERVICE_ACCOUNT_FILE
+  value: "${GCP_MOUNT_DIR}/${GCP_SECRET_FILE_NAME}"
 EOF
 )
         extra_volume_mounts=$(cat <<EOF
-          - name: gcp-sa
-            mountPath: ${GCP_MOUNT_DIR}
-            readOnly: true
+- name: gcp-sa
+  mountPath: ${GCP_MOUNT_DIR}
+  readOnly: true
 EOF
 )
         extra_volumes=$(cat <<EOF
-        - name: gcp-sa
-          secret:
-            secretName: ${SECRET_NAME}
-            items:
-              - key: ${GCP_SECRET_FILE_NAME}
-                path: ${GCP_SECRET_FILE_NAME}
+- name: gcp-sa
+  secret:
+    secretName: ${SECRET_NAME}
+    items:
+      - key: ${GCP_SECRET_FILE_NAME}
+        path: ${GCP_SECRET_FILE_NAME}
 EOF
 )
       fi
@@ -470,28 +476,28 @@ EOF
     azure)
       if [[ "${USE_IAM}" != "true" ]]; then
         extra_env=$(cat <<EOF
-            - name: GRAVITINO_AZURE_STORAGE_ACCOUNT_NAME
-              valueFrom:
-                secretKeyRef:
-                  name: ${SECRET_NAME}
-                  key: AZURE_STORAGE_ACCOUNT
-            - name: GRAVITINO_AZURE_STORAGE_ACCOUNT_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: ${SECRET_NAME}
-                  key: AZURE_STORAGE_KEY
-            - name: GRAVITINO_AZURE_TENANT_ID
-              value: "${AZURE_TENANT_ID}"
-            - name: GRAVITINO_AZURE_CLIENT_ID
-              value: "${AZURE_CLIENT_ID}"
+- name: GRAVITINO_AZURE_STORAGE_ACCOUNT_NAME
+  valueFrom:
+    secretKeyRef:
+      name: ${SECRET_NAME}
+      key: AZURE_STORAGE_ACCOUNT
+- name: GRAVITINO_AZURE_STORAGE_ACCOUNT_KEY
+  valueFrom:
+    secretKeyRef:
+      name: ${SECRET_NAME}
+      key: AZURE_STORAGE_KEY
+- name: GRAVITINO_AZURE_TENANT_ID
+  value: "${AZURE_TENANT_ID}"
+- name: GRAVITINO_AZURE_CLIENT_ID
+  value: "${AZURE_CLIENT_ID}"
 EOF
 )
       else
         extra_env=$(cat <<EOF
-            - name: GRAVITINO_AZURE_TENANT_ID
-              value: "${AZURE_TENANT_ID}"
-            - name: GRAVITINO_AZURE_CLIENT_ID
-              value: "${AZURE_CLIENT_ID}"
+- name: GRAVITINO_AZURE_TENANT_ID
+  value: "${AZURE_TENANT_ID}"
+- name: GRAVITINO_AZURE_CLIENT_ID
+  value: "${AZURE_CLIENT_ID}"
 EOF
 )
       fi
@@ -542,12 +548,23 @@ spec:
             - sh
             - -c
             - cp -a /config/. /conf/ && chmod -R ug+rwX /conf || true
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 0
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: config
               mountPath: /config
               readOnly: true
             - name: conf
               mountPath: /conf
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: grav
           image: ${IMAGE}
@@ -580,7 +597,7 @@ spec:
                 secretKeyRef:
                   name: ${pg_secret}
                   key: password
-${extra_env}
+$(printf '%s' "${extra_env}" | indent_block 12)
             - name: ICEBERG_REST_AUTH_TYPE
               value: "basic"
             - name: ICEBERG_REST_USER
@@ -639,7 +656,7 @@ ${extra_env}
               mountPath: /tmp
             - name: tmp
               mountPath: /var/tmp
-${extra_volume_mounts}
+$(printf '%s' "${extra_volume_mounts}" | indent_block 12)
       volumes:
         - name: config
           configMap:
@@ -650,7 +667,7 @@ ${extra_volume_mounts}
           emptyDir: {}
         - name: tmp
           emptyDir: {}
-${extra_volumes}
+$(printf '%s' "${extra_volumes}" | indent_block 8)
 EOF
 
   cat > "${svc}" <<EOF
