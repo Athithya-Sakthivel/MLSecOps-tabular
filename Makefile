@@ -1,7 +1,7 @@
 lc:
 	kind delete cluster --name local-cluster || true && kind create cluster --name local-cluster && bash src/infra/core/default_storage_class.sh && sleep 15 && \
 	bash src/infra/core/postgres_cluster.sh --rollout && bash src/infra/iceberg/iceberg.sh --rollout && bash src/infra/core/spark_operator.sh --rollout && \
-	python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/ELT/ops/register_elt_setup.sh
+	python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/ELT/commands.sh
 
 set-sa:
 	bash src/core/default_storage_class.sh

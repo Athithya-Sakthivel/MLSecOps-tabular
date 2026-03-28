@@ -135,6 +135,8 @@ Postgres
 .pdm-python
 .pdm-build/
 src/manifests/flyte/values.yaml
+src/manifests/iceberg/deployment.yaml
+
 # pixi
 #   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
 #pixi.lock

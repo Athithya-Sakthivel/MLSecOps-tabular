@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 
+rm -f ~/.docker/config.json || true
+
 echo $GITHUB_TOKEN | docker login ghcr.io -u athithya-sakthivel --password-stdin
 
-docker build -t ghcr.io/athithya-sakthivel/iceberg-rest-gravitino-postgres:1.1.0 \
+docker build -t ghcr.io/athithya-sakthivel/iceberg-rest-gravitino-postgres:1.1.3 \
   -f src/infra/iceberg/Dockerfile .
 
 
-docker push ghcr.io/athithya-sakthivel/iceberg-rest-gravitino-postgres:1.1.0
+docker push ghcr.io/athithya-sakthivel/iceberg-rest-gravitino-postgres:1.1.3
 
 # https://github.com/users/<GH_USERNAME>/packages/container/package/iceberg-rest-gravitino-postgres
 

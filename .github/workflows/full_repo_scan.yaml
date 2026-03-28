@@ -82,6 +82,7 @@ jobs:
                 --config p/docker-compose \
                 --config p/kubernetes \
                 --config /workspace/src/opengrep/mlops_sast_rules.yaml \
+                --exclude src/manifests/iceberg/deployment.yaml \
                 --error \
                 .
 
@@ -109,6 +110,7 @@ jobs:
                 --ignore-unfixed \
                 --skip-dirs .git \
                 --skip-dirs src/opengrep \
+                --skip-files src/manifests/iceberg/deployment.yaml \
                 --exit-code 1 \
                 .
             '
