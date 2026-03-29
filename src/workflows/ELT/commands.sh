@@ -2,7 +2,7 @@ bash -lc 'set -Eeuo pipefail
 source .venv_elt/bin/activate
 export ELT_PROFILE="staging"
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-export ELT_TASK_IMAGE="ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-08-46--23128af@sha256:ebf5406cfe3aa4507e110229dbcbb47be433bf971eeedc7d5edf38bfc6c897e2"
+export ELT_TASK_IMAGE="ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-20-19--18b29cc@sha256:294972362d9cbab2e0cb65a539f8ff1def0d0059641fba531cdc6099e4656787"
 python -m workflows.ELT.run register
 python -m workflows.ELT.run elt
 

@@ -70,7 +70,7 @@ instance/
 
 # Scrapy stuff:
 .scrapy
-
+*.git
 # Sphinx documentation
 docs/_build/
 
@@ -209,7 +209,12 @@ cython_debug/
 
 # Ruff stuff:
 .ruff_cache/
-
+.repos
+.venv_deploy
+.venv_elt
+*.git
+.git
+data
 # PyPI configuration file
 .pypirc
 

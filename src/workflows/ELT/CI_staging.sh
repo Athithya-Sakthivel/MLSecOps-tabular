@@ -11,18 +11,10 @@ rm -f ~/.docker/config.json || true
 
 echo "${GIT_PAT}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
 
-docker build \
-  -t "${ELT_TASK_IMAGE}" \
-  -f src/workflows/ELT/Dockerfile.flyte_task \
-  .
+docker build --no-cache -t "${ELT_TASK_IMAGE}" \
+  -f src/workflows/ELT/Dockerfile.flyte_task .
 
 docker push "${ELT_TASK_IMAGE}"
 
 echo "Pushed:"
 echo "  ${ELT_TASK_IMAGE}. Enable public access"
-
-
-
-
-
-  
