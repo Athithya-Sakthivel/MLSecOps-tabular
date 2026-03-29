@@ -1,4 +1,4 @@
-# Base image provides Apache Gravitino Iceberg REST catalog used by engines to access Iceberg tables through a unified API for multi 
+# Base image provides Apache Gravitino Iceberg REST catalog used by engines to access Iceberg tables through a unified API for multi env
 # PostgreSQL JDBC driver is added because the catalog backend stores metadata in Postgres and the upstream image does not ship DB drivers
 
 FROM apache/gravitino-iceberg-rest:1.1.0

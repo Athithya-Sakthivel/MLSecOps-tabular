@@ -37,7 +37,7 @@ ELT_PROFILE = (
 SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark")
 ELT_TASK_IMAGE = os.environ.get(
     "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-28-16-58--ab2a8d6",
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-07-26--4162406@sha256:79ab860f821f3d26a08ab9f4c53e19c5ef63d42e93c4cd2d2b00d4f9b6d160f8",
 ).strip()
 if not ELT_TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must not be empty")
@@ -449,6 +449,7 @@ def bootstrap_target_namespace() -> None:
             "-",
         ],
         input_text=f"""apiVersion: v1
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {SPARK_SERVICE_ACCOUNT}
@@ -461,8 +462,21 @@ metadata:
   namespace: {TASK_NAMESPACE}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "configmaps", "events"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - configmaps
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection   # REQUIRED for Spark cleanup
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

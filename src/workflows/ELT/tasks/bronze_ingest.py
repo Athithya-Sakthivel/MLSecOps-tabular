@@ -23,22 +23,23 @@ _handler.setFormatter(logging.Formatter("%(message)s"))
 LOG.handlers[:] = [_handler]
 LOG.propagate = False
 
-CATALOG_NAME = os.environ.get("ICEBERG_CATALOG", "iceberg")
+CATALOG_NAME = os.environ.get("ICEBERG_CATALOG", "iceberg").strip()
 ICEBERG_WAREHOUSE = (
     os.environ.get(
         "ICEBERG_WAREHOUSE",
         "s3://e2e-mlops-data-681802563986/iceberg/warehouse/",
     )
+    .strip()
     .rstrip("/")
     + "/"
 )
 ICEBERG_REST_URI = os.environ.get(
     "ICEBERG_REST_URI",
     "http://iceberg-rest.default.svc.cluster.local:9001/iceberg",
-)
-ICEBERG_REST_AUTH_TYPE = os.environ.get("ICEBERG_REST_AUTH_TYPE", "")
-ICEBERG_REST_USER = os.environ.get("ICEBERG_REST_USER", "")
-ICEBERG_REST_PASSWORD = os.environ.get("ICEBERG_REST_PASSWORD", "")
+).strip()
+ICEBERG_REST_AUTH_TYPE = os.environ.get("ICEBERG_REST_AUTH_TYPE", "").strip()
+ICEBERG_REST_USER = os.environ.get("ICEBERG_REST_USER", "").strip()
+ICEBERG_REST_PASSWORD = os.environ.get("ICEBERG_REST_PASSWORD", "").strip()
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
 ELT_PROFILE = os.environ.get(
@@ -59,46 +60,46 @@ AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN", "").strip()
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").strip()
 S3_PATH_STYLE_ACCESS = os.environ.get("S3_PATH_STYLE_ACCESS", "false").strip().lower()
 
-BRONZE_NAMESPACE = os.environ.get("BRONZE_NAMESPACE", "bronze")
-SILVER_NAMESPACE = os.environ.get("SILVER_NAMESPACE", "silver")
-GOLD_NAMESPACE = os.environ.get("GOLD_NAMESPACE", "gold")
+BRONZE_NAMESPACE = os.environ.get("BRONZE_NAMESPACE", "bronze").strip()
+SILVER_NAMESPACE = os.environ.get("SILVER_NAMESPACE", "silver").strip()
+GOLD_NAMESPACE = os.environ.get("GOLD_NAMESPACE", "gold").strip()
 
 BRONZE_TRIPS_TABLE = os.environ.get(
     "BRONZE_TRIPS_TABLE",
     f"{CATALOG_NAME}.bronze.trips_raw",
-)
+).strip()
 BRONZE_TAXI_ZONE_TABLE = os.environ.get(
     "BRONZE_TAXI_ZONE_TABLE",
     f"{CATALOG_NAME}.bronze.taxi_zone_lookup_raw",
-)
+).strip()
 SILVER_TRIPS_TABLE = os.environ.get(
     "SILVER_TRIPS_TABLE",
     f"{CATALOG_NAME}.silver.trip_canonical",
-)
+).strip()
 GOLD_TRAINING_TABLE = os.environ.get(
     "GOLD_TRAINING_TABLE",
     f"{CATALOG_NAME}.gold.trip_training_matrix",
-)
+).strip()
 GOLD_CONTRACT_TABLE = os.environ.get(
     "GOLD_CONTRACT_TABLE",
     f"{CATALOG_NAME}.gold.trip_training_contracts",
-)
+).strip()
 
-TRIPS_DATASET_ID = os.environ.get("TRIPS_DATASET_ID", "koorukuroo/yellow_tripdata")
-TRIPS_DATASET_SPLIT = os.environ.get("TRIPS_DATASET_SPLIT", "train")
+TRIPS_DATASET_ID = os.environ.get("TRIPS_DATASET_ID", "koorukuroo/yellow_tripdata").strip()
+TRIPS_DATASET_SPLIT = os.environ.get("TRIPS_DATASET_SPLIT", "train").strip()
 TRIPS_DATASET_REVISION = os.environ.get(
     "TRIPS_DATASET_REVISION",
     "ef7653853df26ba2cd9ccbae6db2f4094c2d63b0",
-)
+).strip()
 TAXI_ZONE_LOOKUP_URL = os.environ.get(
     "TAXI_ZONE_LOOKUP_URL",
     "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv",
-)
+).strip()
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or None
 
 TASK_IMAGE = os.environ.get(
     "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-28-16-58--ab2a8d6",
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-07-26--4162406@sha256:79ab860f821f3d26a08ab9f4c53e19c5ef63d42e93c4cd2d2b00d4f9b6d160f8",
 ).strip()
 if not TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must be set before importing bronze_ingest.py")
@@ -323,6 +324,7 @@ def build_spark_conf(
         conf[f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.basic.username"] = ICEBERG_REST_USER
     if ICEBERG_REST_PASSWORD:
         conf[f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.basic.password"] = ICEBERG_REST_PASSWORD
+
     return conf
 
 
@@ -385,6 +387,57 @@ def get_spark_session() -> SparkSession:
         )
 
     return spark
+
+
+def validate_iceberg_catalog(spark: SparkSession) -> None:
+    type_key = f"spark.sql.catalog.{CATALOG_NAME}.type"
+    uri_key = f"spark.sql.catalog.{CATALOG_NAME}.uri"
+    warehouse_key = f"spark.sql.catalog.{CATALOG_NAME}.warehouse"
+
+    catalog_type = spark.conf.get(type_key, "").strip().lower()
+    catalog_uri = spark.conf.get(uri_key, "").strip()
+    catalog_warehouse = spark.conf.get(warehouse_key, "").strip()
+
+    if catalog_type != "rest":
+        raise RuntimeError(
+            f"Iceberg catalog misconfigured: expected {type_key}=rest, got {catalog_type!r}"
+        )
+
+    if not catalog_uri:
+        raise RuntimeError(f"Iceberg catalog misconfigured: missing {uri_key}")
+
+    if catalog_uri.startswith("s3://"):
+        raise RuntimeError(
+            f"Iceberg catalog misconfigured: {uri_key} points at a warehouse path, not the REST endpoint: {catalog_uri!r}"
+        )
+
+    if not catalog_uri.startswith(("http://", "https://")):
+        raise RuntimeError(
+            f"Iceberg catalog misconfigured: {uri_key} must be an http(s) REST endpoint, got {catalog_uri!r}"
+        )
+
+    if not catalog_warehouse.startswith("s3://"):
+        raise RuntimeError(
+            f"Iceberg catalog misconfigured: {warehouse_key} must be an s3:// warehouse path, got {catalog_warehouse!r}"
+        )
+
+    log_json(
+        msg="iceberg_catalog_config",
+        catalog=CATALOG_NAME,
+        type=catalog_type,
+        uri=catalog_uri,
+        warehouse=catalog_warehouse,
+    )
+
+    try:
+        spark.sql(f"SHOW NAMESPACES IN {CATALOG_NAME}").limit(1).collect()
+    except Exception as exc:
+        raise RuntimeError(
+            "Iceberg catalog validation failed while contacting the REST endpoint. "
+            "Check that Spark is configured with spark.sql.catalog.<name>.type=rest, "
+            "spark.sql.catalog.<name>.uri points at the Iceberg REST service, and "
+            "the REST auth properties match the server."
+        ) from exc
 
 
 def iter_preview_rows(stream: Iterable[dict], n: int = 2) -> tuple[list[dict], Iterable[dict]]:
@@ -626,10 +679,22 @@ def bronze_ingest() -> BronzeIngestResult:
         profile=ELT_PROFILE,
         k8s_cluster=K8S_CLUSTER,
         aws_credential_mode=detect_aws_credential_mode(),
+        iceberg_catalog=CATALOG_NAME,
+        iceberg_rest_uri=ICEBERG_REST_URI,
+        iceberg_warehouse=ICEBERG_WAREHOUSE,
         trips_source=trips_source_ref,
         taxi_zone_source=taxi_zone_source_ref,
         max_rows=MAX_ROWS_TO_EXTRACT_FROM_DATASETS,
     )
+
+    spark = get_spark_session()
+    spark.sparkContext.setLogLevel(os.environ.get("SPARK_LOG_LEVEL", "WARN"))
+
+    validate_iceberg_catalog(spark)
+
+    ensure_namespace(spark, CATALOG_NAME, BRONZE_NAMESPACE)
+    ensure_namespace(spark, CATALOG_NAME, SILVER_NAMESPACE)
+    ensure_namespace(spark, CATALOG_NAME, GOLD_NAMESPACE)
 
     trips_stream = load_streaming_dataset(
         TRIPS_DATASET_ID,
@@ -655,13 +720,6 @@ def bronze_ingest() -> BronzeIngestResult:
     if MAX_ROWS_TO_EXTRACT_FROM_DATASETS > 0:
         trips_iter = islice(trips_iter, MAX_ROWS_TO_EXTRACT_FROM_DATASETS)
         taxi_iter = islice(taxi_iter, MAX_ROWS_TO_EXTRACT_FROM_DATASETS)
-
-    spark = get_spark_session()
-    spark.sparkContext.setLogLevel(os.environ.get("SPARK_LOG_LEVEL", "WARN"))
-
-    ensure_namespace(spark, CATALOG_NAME, BRONZE_NAMESPACE)
-    ensure_namespace(spark, CATALOG_NAME, SILVER_NAMESPACE)
-    ensure_namespace(spark, CATALOG_NAME, GOLD_NAMESPACE)
 
     trips_raw_df, trips_rows = stream_to_dataframe(
         spark,

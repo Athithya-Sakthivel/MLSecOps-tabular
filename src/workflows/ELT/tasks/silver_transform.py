@@ -13,19 +13,23 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
-from workflows.ELT.tasks.bronze_ingest import (
+from src.workflows.ELT.tasks.bronze_ingest import (
+    BRONZE_NAMESPACE,
     CATALOG_NAME,
+    GOLD_NAMESPACE,
     SILVER_NAMESPACE,
     SILVER_TRIPS_TABLE,
     TASK_IMAGE,
     BronzeIngestResult,
     build_hadoop_conf,
     build_spark_conf,
+    build_task_environment,
     ensure_namespace,
     get_spark_session,
     log_json,
     qualify_table_id,
     table_exists,
+    validate_iceberg_catalog,
 )
 
 LOG = logging.getLogger("elt_silver_transform")
@@ -69,6 +73,7 @@ else:
     SPARK_MAX_RESULT_SIZE = os.environ.get("SPARK_MAX_RESULT_SIZE", "128m")
     TASK_RETRIES = int(os.environ.get("SILVER_TASK_RETRIES", "1"))
     SILVER_ROWS_PER_PARTITION = int(os.environ.get("SILVER_ROWS_PER_PARTITION", "50000"))
+
 
 @dataclass(frozen=True)
 class SilverTransformResult:
@@ -141,7 +146,7 @@ def ensure_zone_schema(df: DataFrame) -> DataFrame:
     required = ("location_id", "borough", "zone", "service_zone")
     require_columns(df, required, "bronze taxi zone table")
 
-    normalized = (
+    return (
         df.select(
             F.col("location_id").cast("long").alias("location_id"),
             F.col("borough").cast("string").alias("borough"),
@@ -150,7 +155,6 @@ def ensure_zone_schema(df: DataFrame) -> DataFrame:
         )
         .dropDuplicates(["location_id"])
     )
-    return normalized
 
 
 def stable_trip_id_expr() -> F.Column:
@@ -269,7 +273,9 @@ def build_canonical_frame(trips_df: DataFrame, zones_df: DataFrame, run_id: str)
         .withColumn("pickup_month", F.month(F.col("pickup_ts")).cast("int"))
         .withColumn(
             "pickup_is_weekend",
-            F.when(F.dayofweek(F.col("pickup_ts")).isin(1, 7), F.lit(1)).otherwise(F.lit(0)).cast("int"),
+            F.when(F.dayofweek(F.col("pickup_ts")).isin(1, 7), F.lit(1))
+            .otherwise(F.lit(0))
+            .cast("int"),
         )
         .withColumn(
             "trip_duration_seconds",
@@ -383,6 +389,7 @@ def silver_spark_conf() -> dict[str, str]:
         executor_path="/opt/venv/bin/python",
     ),
     container_image=TASK_IMAGE,
+    environment=build_task_environment(),
     retries=TASK_RETRIES,
     limits=TASK_LIMITS,
 )
@@ -390,11 +397,15 @@ def silver_transform(bronze: BronzeIngestResult) -> SilverTransformResult:
     spark = get_spark_session()
     spark.sparkContext.setLogLevel(os.environ.get("SPARK_LOG_LEVEL", "WARN"))
 
+    validate_iceberg_catalog(spark)
+
     bronze_trips_table = qualify_table_id(bronze.trips_table)
     bronze_taxi_zone_table = qualify_table_id(bronze.taxi_zone_table)
     silver_table = qualify_table_id(SILVER_TRIPS_TABLE)
 
     ensure_namespace(spark, CATALOG_NAME, SILVER_NAMESPACE)
+    ensure_namespace(spark, CATALOG_NAME, BRONZE_NAMESPACE)
+    ensure_namespace(spark, CATALOG_NAME, GOLD_NAMESPACE)
 
     log_json(
         msg="silver_transform_start",

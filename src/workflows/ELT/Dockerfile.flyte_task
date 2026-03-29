@@ -1,4 +1,4 @@
-# Flyte ELT runtime image.
+# Flyte ELT runtime task image.
 # Base image: Apache Spark 4.0.2 + Scala 2.13 + Java 21 + Python 3 on Ubuntu.
 # The image adds:
 # - a dedicated Python venv for Flyte task execution
