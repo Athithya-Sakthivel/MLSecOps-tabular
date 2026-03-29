@@ -5,8 +5,6 @@
 # - minimal Python dependencies used by the tasks
 # - Iceberg + Hadoop AWS runtime jars
 # - writable cache directories for Hugging Face / datasets
-#
-# No application source code is baked in.
 # FROM apache/spark:4.0.2-scala2.13-java21-python3-ubuntu
 FROM apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
 
@@ -36,7 +34,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     python3-venv \
-    tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep /opt/venv because the current Flyte Spark task config uses:
