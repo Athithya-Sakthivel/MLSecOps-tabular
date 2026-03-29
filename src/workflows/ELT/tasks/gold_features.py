@@ -31,14 +31,15 @@ from src.workflows.ELT.tasks.bronze_ingest import (
     log_json,
     qualify_table_id,
     table_exists,
+    validate_iceberg_catalog,
 )
 from src.workflows.ELT.tasks.silver_transform import SilverTransformResult
 
 LOG = logging.getLogger("elt_gold_features")
 LOG.setLevel(logging.INFO)
-_handler = logging.StreamHandler(stream=sys.stdout)
-_handler.setFormatter(logging.Formatter("%(message)s"))
-LOG.handlers[:] = [_handler]
+_HANDLER = logging.StreamHandler(stream=sys.stdout)
+_HANDLER.setFormatter(logging.Formatter("%(message)s"))
+LOG.handlers[:] = [_HANDLER]
 LOG.propagate = False
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
@@ -46,42 +47,53 @@ ELT_PROFILE = os.environ.get(
     "ELT_PROFILE",
     "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
 ).strip().lower()
+IS_PROD = ELT_PROFILE == "prod"
 
-FEATURE_VERSION = os.environ.get("GOLD_FEATURE_VERSION", "trip_eta_lgbm_v1")
-SCHEMA_VERSION = os.environ.get("GOLD_SCHEMA_VERSION", "trip_eta_frozen_matrix_v1")
+FEATURE_VERSION = os.environ.get("GOLD_FEATURE_VERSION", "trip_eta_lgbm_v1").strip()
+SCHEMA_VERSION = os.environ.get("GOLD_SCHEMA_VERSION", "trip_eta_frozen_matrix_v1").strip()
 ROUTE_PAIR_BUCKETS = int(os.environ.get("ROUTE_PAIR_BUCKETS", "4096"))
-ROUTE_PAIR_HASH_SALT = os.environ.get("ROUTE_PAIR_HASH_SALT", "trip_eta_route_pair_v1")
-MODEL_FAMILY = os.environ.get("MODEL_FAMILY", "lightgbm")
-INFERENCE_RUNTIME = os.environ.get("INFERENCE_RUNTIME", "onnxruntime")
+ROUTE_PAIR_HASH_SALT = os.environ.get("ROUTE_PAIR_HASH_SALT", "trip_eta_route_pair_v1").strip()
+MODEL_FAMILY = os.environ.get("MODEL_FAMILY", "lightgbm").strip()
+INFERENCE_RUNTIME = os.environ.get("INFERENCE_RUNTIME", "onnxruntime").strip()
 
-if ELT_PROFILE == "prod":
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    value = int(os.environ.get(name, str(default)))
+    return max(value, minimum)
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.environ.get(name, default).strip()
+
+
+if IS_PROD:
     TASK_LIMITS = Resources(cpu="1000m", mem="1024Mi")
-    GOLD_REPARTITIONS = int(os.environ.get("GOLD_REPARTITIONS", "8"))
-    TASK_RETRIES = int(os.environ.get("GOLD_TASK_RETRIES", "1"))
-    SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "2g")
-    SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "2g")
-    SPARK_DRIVER_MEMORY_OVERHEAD = os.environ.get("SPARK_DRIVER_MEMORY_OVERHEAD", "512m")
-    SPARK_EXECUTOR_MEMORY_OVERHEAD = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "512m")
-    SPARK_EXECUTOR_CORES = os.environ.get("SPARK_EXECUTOR_CORES", "1")
-    SPARK_EXECUTOR_INSTANCES = os.environ.get("SPARK_EXECUTOR_INSTANCES", "1")
-    SPARK_DRIVER_CORES = os.environ.get("SPARK_DRIVER_CORES", "1")
-    SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "8")
-    SPARK_MAX_PARTITION_BYTES = os.environ.get("SPARK_MAX_PARTITION_BYTES", "134217728")
-    SPARK_MAX_RESULT_SIZE = os.environ.get("SPARK_MAX_RESULT_SIZE", "256m")
+    GOLD_REPARTITIONS = _env_int("GOLD_REPARTITIONS", 8, minimum=1)
+    TASK_RETRIES = _env_int("GOLD_TASK_RETRIES", 1, minimum=0)
+    SPARK_DRIVER_MEMORY = _env_str("SPARK_DRIVER_MEMORY", "2g")
+    SPARK_EXECUTOR_MEMORY = _env_str("SPARK_EXECUTOR_MEMORY", "2g")
+    SPARK_DRIVER_MEMORY_OVERHEAD = _env_str("SPARK_DRIVER_MEMORY_OVERHEAD", "512m")
+    SPARK_EXECUTOR_MEMORY_OVERHEAD = _env_str("SPARK_EXECUTOR_MEMORY_OVERHEAD", "512m")
+    SPARK_EXECUTOR_CORES = _env_str("SPARK_EXECUTOR_CORES", "1")
+    SPARK_EXECUTOR_INSTANCES = _env_str("SPARK_EXECUTOR_INSTANCES", "1")
+    SPARK_DRIVER_CORES = _env_str("SPARK_DRIVER_CORES", "1")
+    SPARK_SHUFFLE_PARTITIONS = _env_str("SPARK_SHUFFLE_PARTITIONS", "8")
+    SPARK_MAX_PARTITION_BYTES = _env_str("SPARK_MAX_PARTITION_BYTES", "134217728")
+    SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "256m")
 else:
     TASK_LIMITS = Resources(cpu="500m", mem="768Mi")
-    GOLD_REPARTITIONS = int(os.environ.get("GOLD_REPARTITIONS", "4"))
-    TASK_RETRIES = int(os.environ.get("GOLD_TASK_RETRIES", "1"))
-    SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "1g")
-    SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "1g")
-    SPARK_DRIVER_MEMORY_OVERHEAD = os.environ.get("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
-    SPARK_EXECUTOR_MEMORY_OVERHEAD = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
-    SPARK_EXECUTOR_CORES = os.environ.get("SPARK_EXECUTOR_CORES", "1")
-    SPARK_EXECUTOR_INSTANCES = os.environ.get("SPARK_EXECUTOR_INSTANCES", "1")
-    SPARK_DRIVER_CORES = os.environ.get("SPARK_DRIVER_CORES", "1")
-    SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
-    SPARK_MAX_PARTITION_BYTES = os.environ.get("SPARK_MAX_PARTITION_BYTES", "67108864")
-    SPARK_MAX_RESULT_SIZE = os.environ.get("SPARK_MAX_RESULT_SIZE", "128m")
+    GOLD_REPARTITIONS = _env_int("GOLD_REPARTITIONS", 4, minimum=1)
+    TASK_RETRIES = _env_int("GOLD_TASK_RETRIES", 1, minimum=0)
+    SPARK_DRIVER_MEMORY = _env_str("SPARK_DRIVER_MEMORY", "1g")
+    SPARK_EXECUTOR_MEMORY = _env_str("SPARK_EXECUTOR_MEMORY", "1g")
+    SPARK_DRIVER_MEMORY_OVERHEAD = _env_str("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
+    SPARK_EXECUTOR_MEMORY_OVERHEAD = _env_str("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
+    SPARK_EXECUTOR_CORES = _env_str("SPARK_EXECUTOR_CORES", "1")
+    SPARK_EXECUTOR_INSTANCES = _env_str("SPARK_EXECUTOR_INSTANCES", "1")
+    SPARK_DRIVER_CORES = _env_str("SPARK_DRIVER_CORES", "1")
+    SPARK_SHUFFLE_PARTITIONS = _env_str("SPARK_SHUFFLE_PARTITIONS", "4")
+    SPARK_MAX_PARTITION_BYTES = _env_str("SPARK_MAX_PARTITION_BYTES", "67108864")
+    SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "128m")
 
 
 @dataclass(frozen=True)
@@ -103,51 +115,39 @@ def require_columns(df: DataFrame, required: Sequence[str], label: str) -> None:
         raise RuntimeError(f"{label} is missing required columns: {sorted(missing)}")
 
 
-def validate_iceberg_catalog(spark) -> None:
-    required = (
-        f"spark.sql.catalog.{CATALOG_NAME}",
-        f"spark.sql.catalog.{CATALOG_NAME}.type",
-        f"spark.sql.catalog.{CATALOG_NAME}.uri",
-        f"spark.sql.catalog.{CATALOG_NAME}.warehouse",
-        "spark.sql.extensions",
-    )
-    conf = dict(spark.sparkContext.getConf().getAll())
-    missing = [key for key in required if not conf.get(key)]
-    if missing:
-        raise RuntimeError(f"iceberg catalog configuration is incomplete: {sorted(missing)}")
-
-
 def write_partitioned_iceberg_table(df: DataFrame, table_id: str, partition_column: str) -> str:
     table_id = qualify_table_id(table_id)
-    if table_exists(df.sparkSession, table_id):
-        df.writeTo(table_id).overwritePartitions()
-        return "overwrite_partitions"
-
-    (
+    writer = (
         df.writeTo(table_id)
         .tableProperty("format-version", "2")
         .tableProperty("write.format.default", "parquet")
         .tableProperty("write.target-file-size-bytes", ICEBERG_TARGET_FILE_SIZE_BYTES)
         .partitionedBy(F.col(partition_column))
-        .create()
     )
+
+    if table_exists(df.sparkSession, table_id):
+        writer.overwritePartitions()
+        return "overwrite_partitions"
+
+    writer.create()
     return "create"
 
 
 def write_versioned_contract_table(df: DataFrame, table_id: str) -> str:
     table_id = qualify_table_id(table_id)
-    if table_exists(df.sparkSession, table_id):
-        df.writeTo(table_id).overwritePartitions()
-        return "overwrite_partitions"
-
-    (
+    writer = (
         df.writeTo(table_id)
         .tableProperty("format-version", "2")
         .tableProperty("write.format.default", "parquet")
         .tableProperty("write.target-file-size-bytes", ICEBERG_TARGET_FILE_SIZE_BYTES)
         .partitionedBy(F.col("feature_version"))
-        .create()
     )
+
+    if table_exists(df.sparkSession, table_id):
+        writer.overwritePartitions()
+        return "overwrite_partitions"
+
+    writer.create()
     return "create"
 
 
@@ -206,13 +206,11 @@ def route_pair_bucket_expr(pickup_zone_id_col: F.Column, dropoff_zone_id_col: F.
         ),
         256,
     )
-    return (
-        F.pmod(
-            F.conv(F.substring(route_hash, 1, 15), 16, 10).cast("long"),
-            F.lit(ROUTE_PAIR_BUCKETS),
-        ).cast("int")
-        + F.lit(1)
-    )
+    bucket = F.pmod(
+        F.conv(F.substring(route_hash, 1, 15), 16, 10).cast("long"),
+        F.lit(ROUTE_PAIR_BUCKETS),
+    ).cast("int")
+    return bucket + F.lit(1)
 
 
 def build_window_features(df: DataFrame) -> DataFrame:
@@ -673,6 +671,7 @@ def build_training_matrix(
         .withColumn("pickup_zone_id", F.coalesce(F.col("pickup_location_id").cast("int"), F.lit(0)).cast("int"))
         .withColumn("dropoff_zone_id", F.coalesce(F.col("dropoff_location_id").cast("int"), F.lit(0)).cast("int"))
         .withColumn("label_trip_duration_seconds", F.col("trip_duration_seconds").cast("double"))
+        .withColumn("gold_run_id", F.lit(run_id))
     )
 
     service_zone_values = distinct_service_zone_values(base)
@@ -775,8 +774,8 @@ def gold_features(silver: SilverTransformResult) -> GoldFeatureResult:
     gold_table = qualify_table_id(GOLD_TRAINING_TABLE)
     contract_table = qualify_table_id(GOLD_CONTRACT_TABLE)
 
-    ensure_namespace(spark, CATALOG_NAME, BRONZE_NAMESPACE)
     ensure_namespace(spark, CATALOG_NAME, GOLD_NAMESPACE)
+    ensure_namespace(spark, CATALOG_NAME, BRONZE_NAMESPACE)
 
     log_json(
         msg="gold_features_start",
@@ -790,6 +789,8 @@ def gold_features(silver: SilverTransformResult) -> GoldFeatureResult:
         schema_version=SCHEMA_VERSION,
         model_family=MODEL_FAMILY,
         inference_runtime=INFERENCE_RUNTIME,
+        route_pair_buckets=ROUTE_PAIR_BUCKETS,
+        spark_shuffle_partitions=SPARK_SHUFFLE_PARTITIONS,
     )
 
     silver_df = spark.table(source_silver_table)
@@ -804,7 +805,7 @@ def gold_features(silver: SilverTransformResult) -> GoldFeatureResult:
         F.col("pickup_hour"),
     )
 
-    write_mode = write_partitioned_iceberg_table(
+    gold_write_mode = write_partitioned_iceberg_table(
         training_df,
         gold_table,
         "as_of_date",
@@ -887,7 +888,7 @@ def gold_features(silver: SilverTransformResult) -> GoldFeatureResult:
         schema_hash=schema_hash,
         feature_version=FEATURE_VERSION,
         schema_version=SCHEMA_VERSION,
-        write_mode=f"{write_mode};contract={contract_write_mode}",
+        write_mode=f"{gold_write_mode};contract={contract_write_mode}",
         status="ok",
     )
     log_json(msg="gold_features_success", **result.__dict__)

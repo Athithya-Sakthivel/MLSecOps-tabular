@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 1. Assumes CNPG and PgBouncer already exist; this script deploys only the Iceberg REST layer.
-# 2. Uses the documented Gravitino env mappings for JDBC, object-store, and HTTP-port settings.
-# 3. Keeps only file-only settings (static provider/back-end name) in the ConfigMap.
-# 4. Waits for the service to serve /iceberg/v1/config before creating a test namespace.
-# 5. Disables HPA by default to avoid metrics-server noise on kind clusters.
+# Deploys the Iceberg REST service layer only.
+# Assumptions:
+# - CNPG and PgBouncer already exist.
+# - The REST service uses unauthenticated access (auth=none).
+# - Storage credentials are optional only when USE_IAM=true.
 
 set -Eeuo pipefail
 
@@ -17,7 +17,6 @@ SERVICE_NAME="${SERVICE_NAME:-iceberg-rest}"
 DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-iceberg-rest}"
 CONFIGMAP_NAME="${CONFIGMAP_NAME:-iceberg-rest-conf}"
 SECRET_NAME="${SECRET_NAME:-iceberg-storage-credentials}"
-REST_SECRET_NAME="${REST_SECRET_NAME:-iceberg-rest-auth}"
 PORT="${PORT:-9001}"
 ANNOTATION_KEY="${ANNOTATION_KEY:-mlsecops.iceberg.checksum}"
 ENABLE_HPA="${ENABLE_HPA:-false}"
@@ -93,9 +92,12 @@ require_bin(){ command -v "$1" >/dev/null 2>&1 || fatal "$1 required in PATH"; }
 trap 'rc=$?; echo; echo "[DIAG] exit_code=$rc"; echo "[DIAG] kubectl context: $(kubectl config current-context 2>/dev/null || true)"; echo "[DIAG] pods in ns ${TARGET_NS}:"; kubectl -n "${TARGET_NS}" get pods -o wide || true; echo "[DIAG] svc in ns ${TARGET_NS}:"; kubectl -n "${TARGET_NS}" get svc -o wide || true; echo "[DIAG] events (last 200):"; kubectl get events -A --sort-by=.lastTimestamp | tail -n 200 || true; exit $rc' ERR
 
 STORAGE_SECRET_CHANGED=0
-REST_SECRET_CHANGED=0
-REST_AUTH_USER=""
-REST_AUTH_PASSWORD=""
+
+PG_DB=""
+PG_SECRET_NAME=""
+IO_IMPL=""
+WAREHOUSE=""
+GRAVITINO_MEM=""
 
 require_prereqs(){
   require_bin kubectl
@@ -108,7 +110,7 @@ require_prereqs(){
 }
 
 ensure_namespace(){
-  kubectl create ns "${TARGET_NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
+  kubectl create ns "${TARGET_NS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
 find_pg_secret_name(){
@@ -131,6 +133,7 @@ pg_detect_db(){
     printf '%s' "${PG_DB_OVERRIDE}"
     return 0
   fi
+
   local s db
   s="$(find_pg_secret_name)"
   if [[ -n "${s}" ]]; then
@@ -142,6 +145,7 @@ pg_detect_db(){
       return 0
     fi
   fi
+
   log "no dbname found in CNPG secret; falling back to iceberg_catalogue_metadata"
   printf '%s' "iceberg_catalogue_metadata"
 }
@@ -268,46 +272,6 @@ PY
       fatal "unsupported STORAGE_PROVIDER=${STORAGE_PROVIDER}"
       ;;
   esac
-}
-
-random_string(){
-  python3 - <<'PY'
-import secrets
-import string
-alphabet = string.ascii_letters + string.digits
-print(''.join(secrets.choice(alphabet) for _ in range(24)))
-PY
-}
-
-create_or_update_rest_auth_secret(){
-  local existing_user existing_password
-
-  if kubectl -n "${TARGET_NS}" get secret "${REST_SECRET_NAME}" >/dev/null 2>&1; then
-    existing_user="$(kubectl -n "${TARGET_NS}" get secret "${REST_SECRET_NAME}" -o jsonpath='{.data.user}' 2>/dev/null | base64 -d || true)"
-    existing_password="$(kubectl -n "${TARGET_NS}" get secret "${REST_SECRET_NAME}" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-    if [[ -z "${ICEBERG_REST_USER:-}" && -z "${ICEBERG_REST_PASSWORD:-}" ]]; then
-      REST_AUTH_USER="${existing_user}"
-      REST_AUTH_PASSWORD="${existing_password}"
-      log "reusing existing REST auth secret ${REST_SECRET_NAME}"
-      return 0
-    fi
-  fi
-
-  if [[ -z "${ICEBERG_REST_USER:-}" ]]; then
-    ICEBERG_REST_USER="iceberg"
-  fi
-  if [[ -z "${ICEBERG_REST_PASSWORD:-}" ]]; then
-    ICEBERG_REST_PASSWORD="$(random_string)"
-  fi
-
-  kubectl -n "${TARGET_NS}" delete secret "${REST_SECRET_NAME}" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl -n "${TARGET_NS}" create secret generic "${REST_SECRET_NAME}" \
-    --from-literal=user="${ICEBERG_REST_USER}" \
-    --from-literal=password="${ICEBERG_REST_PASSWORD}" >/dev/null
-  REST_SECRET_CHANGED=1
-  REST_AUTH_USER="${ICEBERG_REST_USER}"
-  REST_AUTH_PASSWORD="${ICEBERG_REST_PASSWORD}"
-  log "created/updated REST auth secret ${REST_SECRET_NAME}"
 }
 
 render_configmap(){
@@ -579,17 +543,7 @@ spec:
               key: password
 ${extra_env}
         - name: ICEBERG_REST_AUTH_TYPE
-          value: "basic"
-        - name: ICEBERG_REST_USER
-          valueFrom:
-            secretKeyRef:
-              name: ${REST_SECRET_NAME}
-              key: user
-        - name: ICEBERG_REST_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: ${REST_SECRET_NAME}
-              key: password
+          value: "none"
         resources:
           requests:
             cpu: "${CPU_REQUEST}"
@@ -696,16 +650,6 @@ annotate_with_hash(){
   kubectl -n "${TARGET_NS}" patch configmap "${CONFIGMAP_NAME}" --type=merge -p "{\"metadata\":{\"annotations\":{\"${ANNOTATION_KEY}\":\"${h}\"}}}" >/dev/null 2>&1 || true
 }
 
-kubectl_diff_apply(){
-  local file="$1"
-  if kubectl diff --server-side -f "${file}" >/dev/null 2>&1; then
-    log "no diff for ${file}; skipping apply"
-  else
-    kubectl apply --server-side -f "${file}"
-    log "applied ${file}"
-  fi
-}
-
 apply_manifests_idempotent(){
   local hash existing
   hash=$(compute_manifests_hash)
@@ -716,11 +660,11 @@ apply_manifests_idempotent(){
   fi
 
   kubectl -n "${TARGET_NS}" delete hpa "${DEPLOYMENT_NAME}-hpa" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/serviceaccount.yaml" || true
-  kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/configmap.yaml" || true
-  kubectl_diff_apply "${MANIFEST_DIR}/deployment.yaml"
-  kubectl_diff_apply "${MANIFEST_DIR}/service.yaml"
-  kubectl_diff_apply "${MANIFEST_DIR}/pdb.yaml"
+  kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/serviceaccount.yaml" >/dev/null
+  kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/configmap.yaml" >/dev/null
+  kubectl apply -f "${MANIFEST_DIR}/deployment.yaml" >/dev/null
+  kubectl apply -f "${MANIFEST_DIR}/service.yaml" >/dev/null
+  kubectl apply -f "${MANIFEST_DIR}/pdb.yaml" >/dev/null
   annotate_with_hash "${hash}"
   log "applied manifests and wrote annotation"
 }
@@ -750,21 +694,6 @@ get_deployment_pod(){
   kubectl -n "${TARGET_NS}" get pod -l "app=${DEPLOYMENT_NAME}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
 }
 
-get_rest_creds(){
-  local user pass
-  if [[ -n "${REST_AUTH_USER}" && -n "${REST_AUTH_PASSWORD}" ]]; then
-    printf '%s\n%s' "${REST_AUTH_USER}" "${REST_AUTH_PASSWORD}"
-    return 0
-  fi
-
-  user="$(kubectl -n "${TARGET_NS}" get secret "${REST_SECRET_NAME}" -o jsonpath='{.data.user}' 2>/dev/null | base64 -d || true)"
-  pass="$(kubectl -n "${TARGET_NS}" get secret "${REST_SECRET_NAME}" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || true)"
-  [[ -n "${user}" && -n "${pass}" ]] || fatal "REST auth secret missing or incomplete"
-  REST_AUTH_USER="${user}"
-  REST_AUTH_PASSWORD="${pass}"
-  printf '%s\n%s' "${user}" "${pass}"
-}
-
 dump_iceberg_debug(){
   local pod
   pod="$(get_deployment_pod)"
@@ -783,13 +712,12 @@ dump_iceberg_debug(){
 }
 
 wait_for_rest_config(){
-  local user pass pod attempt response code body
-  read -r user pass < <(get_rest_creds)
+  local pod attempt response code body
 
   for attempt in $(seq 1 "${SMOKE_TIMEOUT}"); do
     pod="$(get_deployment_pod)"
     if [[ -n "${pod}" ]]; then
-      response="$(kubectl -n "${TARGET_NS}" exec -c grav "${pod}" -- env REST_USER="${user}" REST_PASS="${pass}" sh -lc "curl -sS -w '\n%{http_code}' -u \"\$REST_USER:\$REST_PASS\" 'http://127.0.0.1:${PORT}/iceberg/v1/config'" 2>/dev/null || true)"
+      response="$(kubectl -n "${TARGET_NS}" exec -c grav "${pod}" -- sh -lc "curl -sS -w '\n%{http_code}' 'http://127.0.0.1:${PORT}/iceberg/v1/config'" 2>/dev/null || true)"
       if [[ -n "${response}" ]]; then
         code="${response##*$'\n'}"
         body="${response%$'\n'*}"
@@ -807,16 +735,15 @@ wait_for_rest_config(){
 }
 
 run_rest_smoke(){
-  local user pass pod head_status response code body
+  local pod head_status response code body
   log "REST smoke test starting"
 
   wait_for_rest_config
 
-  read -r user pass < <(get_rest_creds)
   pod="$(get_deployment_pod)"
   [[ -n "${pod}" ]] || fatal "no iceberg pod found for REST smoke"
 
-  head_status="$(kubectl -n "${TARGET_NS}" exec -c grav "${pod}" -- env REST_USER="${user}" REST_PASS="${pass}" sh -lc "curl -s -o /dev/null -w '%{http_code}' -u \"\$REST_USER:\$REST_PASS\" -I 'http://127.0.0.1:${PORT}/iceberg/v1/namespaces/mlsecops_smoke'" 2>/dev/null || true)"
+  head_status="$(kubectl -n "${TARGET_NS}" exec -c grav "${pod}" -- sh -lc "curl -s -o /dev/null -w '%{http_code}' -I 'http://127.0.0.1:${PORT}/iceberg/v1/namespaces/mlsecops_smoke'" 2>/dev/null || true)"
   if [[ "${head_status}" == "200" || "${head_status}" == "204" ]]; then
     log "namespace already exists (HEAD=${head_status})"
     return 0
@@ -827,7 +754,7 @@ run_rest_smoke(){
   fi
 
   log "namespace not present, creating"
-  response="$(kubectl -n "${TARGET_NS}" exec -c grav "${pod}" -- env REST_USER="${user}" REST_PASS="${pass}" sh -lc "curl -sS -w '\n%{http_code}' -u \"\$REST_USER:\$REST_PASS\" -X POST -H 'Content-Type: application/json' --data '{\"namespace\":[\"mlsecops_smoke\"]}' 'http://127.0.0.1:${PORT}/iceberg/v1/namespaces'" 2>/dev/null || true)"
+  response="$(kubectl -n "${TARGET_NS}" exec -c grav "${pod}" -- sh -lc "curl -sS -w '\n%{http_code}' -X POST -H 'Content-Type: application/json' --data '{\"namespace\":[\"mlsecops_smoke\"]}' 'http://127.0.0.1:${PORT}/iceberg/v1/namespaces'" 2>/dev/null || true)"
   if [[ -z "${response}" ]]; then
     dump_iceberg_debug
     fatal "REST namespace create returned no response"
@@ -906,11 +833,9 @@ run_objectstore_smoke(){
   esac
 }
 
-mask_uri(){ echo "$1" | sed -E 's#(:)[^:@]+(@)#:\*\*\*\*\*@#'; }
-
-
 print_connection_details(){
-  local s secret user pw db host port jdbc pooler_svc local_pf_port
+  local s secret user pw db host port jdbc pooler_svc local_pf_port rest_url
+
   s="$(find_pg_secret_name)"
   secret="${s:-${FALLBACK_PG_SECRET}}"
 
@@ -923,8 +848,20 @@ print_connection_details(){
   jdbc="jdbc:postgresql://${host}:${port}/${db}"
   pooler_svc="${PG_POOLER_SERVICE_NAME:-${PG_POOLER_HOST%%.*}}"
   local_pf_port="${LOCAL_PG_PORT:-15432}"
+  rest_url="http://${SERVICE_NAME}.${TARGET_NS}.svc.cluster.local:${PORT}/iceberg"
 
-  printf "\nConnection details (unmasked):\n\n"
+  printf "\nConnection details (downstream workflows):\n\n"
+  printf "ICEBERG_REST_URL=%s\n" "${rest_url}"
+  printf "ICEBERG_REST_AUTH_TYPE=none\n"
+  printf "ICEBERG_REST_NAMESPACE=mlsecops_smoke\n"
+  printf "ICEBERG_WAREHOUSE=%s\n" "${WAREHOUSE}"
+  printf "ICEBERG_IO_IMPL=%s\n" "${IO_IMPL}"
+  printf "SPARK_SQL_CATALOG_ICEBERG_TYPE=rest\n"
+  printf "SPARK_SQL_CATALOG_ICEBERG_URI=%s\n" "${rest_url}"
+  printf "SPARK_SQL_CATALOG_ICEBERG_WAREHOUSE=%s\n" "${WAREHOUSE}"
+  printf "SPARK_SQL_CATALOG_ICEBERG_IO_IMPL=%s\n" "${IO_IMPL}"
+
+  printf "\nPostgres connection details:\n\n"
   printf "JDBC_URI=%s\n" "${jdbc}"
   printf "JDBC_USER=%s\n" "${user}"
   printf "JDBC_PASSWORD=%s\n" "${pw}"
@@ -932,9 +869,6 @@ print_connection_details(){
   printf "POOLER_SERVICE=%s\n" "${pooler_svc}"
   printf "POOLER_PORT=%s\n" "${port}"
   printf "DB=%s\n" "${db}"
-  printf "WAREHOUSE=%s\n" "${WAREHOUSE}"
-  printf "IO_IMPL=%s\n" "${IO_IMPL}"
-  printf "REST_AUTH_SECRET=%s\n" "${REST_SECRET_NAME}"
 
   if [[ "${STORAGE_PROVIDER}" == "aws" ]]; then
     printf "S3_BUCKET=%s\n" "${S3_BUCKET}"
@@ -953,10 +887,6 @@ print_connection_details(){
   printf "JDBC_URI_IN_CLUSTER=%s\n" "${jdbc}"
   printf "psql -h %s -p %s -U %s -d %s\n" "${host}" "${port}" "${user}" "${db}"
 
-  printf "\nExample from inside the cluster:\n"
-  printf "kubectl -n %s run --rm -i --restart=Never pgtest --image=postgres:18 --env PGPASSWORD='%s' --env PGUSER='%s' --command -- psql -h %s -p %s -d %s -c 'select current_database();'\n" \
-    "${TARGET_NS}" "${pw}" "${user}" "${host}" "${port}" "${db}"
-
   echo
 }
 
@@ -966,7 +896,6 @@ delete_all(){
   kubectl -n "${TARGET_NS}" delete configmap "${CONFIGMAP_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl -n "${TARGET_NS}" delete sa "${SERVICE_ACCOUNT_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl -n "${TARGET_NS}" delete secret "${SECRET_NAME}" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl -n "${TARGET_NS}" delete secret "${REST_SECRET_NAME}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl -n "${TARGET_NS}" delete hpa "${DEPLOYMENT_NAME}-hpa" --ignore-not-found >/dev/null 2>&1 || true
   kubectl -n "${TARGET_NS}" delete pdb "${DEPLOYMENT_NAME}-pdb" --ignore-not-found >/dev/null 2>&1 || true
   log "deleted iceberg resources; preserved object-store data"
@@ -982,7 +911,7 @@ main_rollout(){
 
   derive_io_and_warehouse
 
-  log "starting iceberg rollout (provider=${K8S_CLUSTER}, ns=${TARGET_NS})"
+  log "starting iceberg rollout (cluster=${K8S_CLUSTER}, ns=${TARGET_NS})"
   log "storage provider=${STORAGE_PROVIDER}, heap mode=${JVM_HEAP_MODE}"
 
   render_configmap
@@ -990,11 +919,9 @@ main_rollout(){
   render_deployment_service_pdb
 
   create_or_update_storage_secret
-  create_or_update_rest_auth_secret
-
   apply_manifests_idempotent
 
-  if [[ "${STORAGE_SECRET_CHANGED}" == "1" || "${REST_SECRET_CHANGED}" == "1" ]]; then
+  if [[ "${STORAGE_SECRET_CHANGED}" == "1" ]]; then
     kubectl -n "${TARGET_NS}" rollout restart deployment "${DEPLOYMENT_NAME}" >/dev/null || true
     log "rolled deployment to pick up secret changes"
   fi
@@ -1004,6 +931,7 @@ main_rollout(){
 
   run_rest_smoke
   run_postgres_smoke
+  run_objectstore_smoke
 
   log "[SUCCESS] iceberg rollout complete"
   print_connection_details

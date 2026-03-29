@@ -34,9 +34,9 @@ from src.workflows.ELT.tasks.bronze_ingest import (
 
 LOG = logging.getLogger("elt_silver_transform")
 LOG.setLevel(logging.INFO)
-_handler = logging.StreamHandler(stream=sys.stdout)
-_handler.setFormatter(logging.Formatter("%(message)s"))
-LOG.handlers[:] = [_handler]
+_HANDLER = logging.StreamHandler(stream=sys.stdout)
+_HANDLER.setFormatter(logging.Formatter("%(message)s"))
+LOG.handlers[:] = [_HANDLER]
 LOG.propagate = False
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
@@ -44,35 +44,48 @@ ELT_PROFILE = os.environ.get(
     "ELT_PROFILE",
     "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
 ).strip().lower()
+IS_PROD = ELT_PROFILE == "prod"
 
-if ELT_PROFILE == "prod":
-    TASK_LIMITS = Resources(cpu="1000m", mem="1024Mi")
-    SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "2g")
-    SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "2g")
-    SPARK_DRIVER_MEMORY_OVERHEAD = os.environ.get("SPARK_DRIVER_MEMORY_OVERHEAD", "512m")
-    SPARK_EXECUTOR_MEMORY_OVERHEAD = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "512m")
-    SPARK_EXECUTOR_CORES = os.environ.get("SPARK_EXECUTOR_CORES", "1")
-    SPARK_EXECUTOR_INSTANCES = os.environ.get("SPARK_EXECUTOR_INSTANCES", "1")
-    SPARK_DRIVER_CORES = os.environ.get("SPARK_DRIVER_CORES", "1")
-    SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "8")
-    SPARK_MAX_PARTITION_BYTES = os.environ.get("SPARK_MAX_PARTITION_BYTES", "134217728")
-    SPARK_MAX_RESULT_SIZE = os.environ.get("SPARK_MAX_RESULT_SIZE", "256m")
-    TASK_RETRIES = int(os.environ.get("SILVER_TASK_RETRIES", "1"))
-    SILVER_ROWS_PER_PARTITION = int(os.environ.get("SILVER_ROWS_PER_PARTITION", "100000"))
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    value = int(os.environ.get(name, str(default)))
+    return max(value, minimum)
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+if IS_PROD:
+    TASK_LIMITS = Resources(cpu="1000m", mem="3Gi")
+    SPARK_DRIVER_MEMORY = _env_str("SPARK_DRIVER_MEMORY", "1g")
+    SPARK_EXECUTOR_MEMORY = _env_str("SPARK_EXECUTOR_MEMORY", "768m")
+    SPARK_DRIVER_MEMORY_OVERHEAD = _env_str("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
+    SPARK_EXECUTOR_MEMORY_OVERHEAD = _env_str("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
+    SPARK_EXECUTOR_CORES = _env_str("SPARK_EXECUTOR_CORES", "1")
+    SPARK_EXECUTOR_INSTANCES = _env_str("SPARK_EXECUTOR_INSTANCES", "1")
+    SPARK_DRIVER_CORES = _env_str("SPARK_DRIVER_CORES", "1")
+    SPARK_SHUFFLE_PARTITIONS = _env_str("SPARK_SHUFFLE_PARTITIONS", "8")
+    SPARK_MAX_PARTITION_BYTES = _env_str("SPARK_MAX_PARTITION_BYTES", "134217728")
+    SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "256m")
+    TASK_RETRIES = _env_int("SILVER_TASK_RETRIES", 1, minimum=0)
+    SILVER_ROWS_PER_PARTITION = _env_int("SILVER_ROWS_PER_PARTITION", 100000, minimum=1)
 else:
-    TASK_LIMITS = Resources(cpu="500m", mem="768Mi")
-    SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "1g")
-    SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "1g")
-    SPARK_DRIVER_MEMORY_OVERHEAD = os.environ.get("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
-    SPARK_EXECUTOR_MEMORY_OVERHEAD = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
-    SPARK_EXECUTOR_CORES = os.environ.get("SPARK_EXECUTOR_CORES", "1")
-    SPARK_EXECUTOR_INSTANCES = os.environ.get("SPARK_EXECUTOR_INSTANCES", "1")
-    SPARK_DRIVER_CORES = os.environ.get("SPARK_DRIVER_CORES", "1")
-    SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
-    SPARK_MAX_PARTITION_BYTES = os.environ.get("SPARK_MAX_PARTITION_BYTES", "67108864")
-    SPARK_MAX_RESULT_SIZE = os.environ.get("SPARK_MAX_RESULT_SIZE", "128m")
-    TASK_RETRIES = int(os.environ.get("SILVER_TASK_RETRIES", "1"))
-    SILVER_ROWS_PER_PARTITION = int(os.environ.get("SILVER_ROWS_PER_PARTITION", "50000"))
+    TASK_LIMITS = Resources(cpu="500m", mem="2Gi")
+    SPARK_DRIVER_MEMORY = _env_str("SPARK_DRIVER_MEMORY", "768m")
+    SPARK_EXECUTOR_MEMORY = _env_str("SPARK_EXECUTOR_MEMORY", "512m")
+    SPARK_DRIVER_MEMORY_OVERHEAD = _env_str("SPARK_DRIVER_MEMORY_OVERHEAD", "128m")
+    SPARK_EXECUTOR_MEMORY_OVERHEAD = _env_str("SPARK_EXECUTOR_MEMORY_OVERHEAD", "128m")
+    SPARK_EXECUTOR_CORES = _env_str("SPARK_EXECUTOR_CORES", "1")
+    SPARK_EXECUTOR_INSTANCES = _env_str("SPARK_EXECUTOR_INSTANCES", "1")
+    SPARK_DRIVER_CORES = _env_str("SPARK_DRIVER_CORES", "1")
+    SPARK_SHUFFLE_PARTITIONS = _env_str("SPARK_SHUFFLE_PARTITIONS", "4")
+    SPARK_MAX_PARTITION_BYTES = _env_str("SPARK_MAX_PARTITION_BYTES", "67108864")
+    SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "128m")
+    TASK_RETRIES = _env_int("SILVER_TASK_RETRIES", 0, minimum=0)
+    SILVER_ROWS_PER_PARTITION = _env_int("SILVER_ROWS_PER_PARTITION", 50000, minimum=1)
+
+ICEBERG_TARGET_FILE_SIZE_BYTES = _env_str("ICEBERG_TARGET_FILE_SIZE_BYTES", "268435456")
 
 
 @dataclass(frozen=True)
@@ -181,18 +194,19 @@ def stable_trip_id_expr() -> F.Column:
 
 def write_partitioned_iceberg_table(df: DataFrame, table_id: str, partition_column: str) -> str:
     table_id = qualify_table_id(table_id)
-    if table_exists(df.sparkSession, table_id):
-        df.writeTo(table_id).overwritePartitions()
-        return "overwrite_partitions"
-
-    (
+    writer = (
         df.writeTo(table_id)
         .tableProperty("format-version", "2")
         .tableProperty("write.format.default", "parquet")
-        .tableProperty("write.target-file-size-bytes", "268435456")
+        .tableProperty("write.target-file-size-bytes", ICEBERG_TARGET_FILE_SIZE_BYTES)
         .partitionedBy(F.col(partition_column))
-        .create()
     )
+
+    if table_exists(df.sparkSession, table_id):
+        writer.overwritePartitions()
+        return "overwrite_partitions"
+
+    writer.create()
     return "create"
 
 
@@ -281,10 +295,7 @@ def build_canonical_frame(trips_df: DataFrame, zones_df: DataFrame, run_id: str)
             "trip_duration_seconds",
             (F.col("dropoff_ts").cast("long") - F.col("pickup_ts").cast("long")).cast("long"),
         )
-        .withColumn(
-            "trip_duration_minutes",
-            F.round(F.col("trip_duration_seconds") / F.lit(60.0), 3),
-        )
+        .withColumn("trip_duration_minutes", F.round(F.col("trip_duration_seconds") / F.lit(60.0), 3))
         .withColumn("silver_run_id", F.lit(run_id))
     )
 
@@ -416,6 +427,7 @@ def silver_transform(bronze: BronzeIngestResult) -> SilverTransformResult:
         bronze_taxi_zone_table=bronze_taxi_zone_table,
         silver_table=silver_table,
         bronze_trips_rows=bronze.trips_rows,
+        silver_rows_per_partition=SILVER_ROWS_PER_PARTITION,
     )
 
     trips_df = spark.table(bronze_trips_table)

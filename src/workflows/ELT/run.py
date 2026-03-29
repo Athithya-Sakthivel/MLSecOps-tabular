@@ -37,7 +37,7 @@ ELT_PROFILE = (
 SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark")
 ELT_TASK_IMAGE = os.environ.get(
     "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-07-26--4162406@sha256:79ab860f821f3d26a08ab9f4c53e19c5ef63d42e93c4cd2d2b00d4f9b6d160f8",
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-08-46--23128af@sha256:ebf5406cfe3aa4507e110229dbcbb47be433bf971eeedc7d5edf38bfc6c897e2",
 ).strip()
 if not ELT_TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must not be empty")
@@ -63,21 +63,25 @@ ACTIVATE_LAUNCHPLANS = os.environ.get("ACTIVATE_LAUNCHPLANS", "0").lower() in {
 }
 USE_LATEST = os.environ.get("USE_LATEST", "0").lower() in {"1", "true", "yes", "y", "on"}
 
-# Optional extra args appended to `pyflyte register`.
 PYFLYTE_REGISTER_EXTRA_ARGS = os.environ.get("PYFLYTE_REGISTER_EXTRA_ARGS", "").strip()
 
 RESOURCE_QUOTA_NAME = os.environ.get("RESOURCE_QUOTA_NAME", "spark-workload-quota")
-RESOURCE_QUOTA_KIND_REQUESTS_CPU = os.environ.get("RESOURCE_QUOTA_KIND_REQUESTS_CPU", "2")
-RESOURCE_QUOTA_KIND_REQUESTS_MEMORY = os.environ.get("RESOURCE_QUOTA_KIND_REQUESTS_MEMORY", "1536Mi")
-RESOURCE_QUOTA_KIND_LIMITS_CPU = os.environ.get("RESOURCE_QUOTA_KIND_LIMITS_CPU", "4")
-RESOURCE_QUOTA_KIND_LIMITS_MEMORY = os.environ.get("RESOURCE_QUOTA_KIND_LIMITS_MEMORY", "3000Mi")
-RESOURCE_QUOTA_KIND_PODS = os.environ.get("RESOURCE_QUOTA_KIND_PODS", "20")
 
-RESOURCE_QUOTA_EKS_REQUESTS_CPU = os.environ.get("RESOURCE_QUOTA_EKS_REQUESTS_CPU", "8")
-RESOURCE_QUOTA_EKS_REQUESTS_MEMORY = os.environ.get("RESOURCE_QUOTA_EKS_REQUESTS_MEMORY", "16Gi")
-RESOURCE_QUOTA_EKS_LIMITS_CPU = os.environ.get("RESOURCE_QUOTA_EKS_LIMITS_CPU", "16")
-RESOURCE_QUOTA_EKS_LIMITS_MEMORY = os.environ.get("RESOURCE_QUOTA_EKS_LIMITS_MEMORY", "32Gi")
+RESOURCE_QUOTA_KIND_REQUESTS_CPU = os.environ.get("RESOURCE_QUOTA_KIND_REQUESTS_CPU", "4")
+RESOURCE_QUOTA_KIND_REQUESTS_MEMORY = os.environ.get("RESOURCE_QUOTA_KIND_REQUESTS_MEMORY", "8Gi")
+RESOURCE_QUOTA_KIND_LIMITS_CPU = os.environ.get("RESOURCE_QUOTA_KIND_LIMITS_CPU", "8")
+RESOURCE_QUOTA_KIND_LIMITS_MEMORY = os.environ.get("RESOURCE_QUOTA_KIND_LIMITS_MEMORY", "12Gi")
+RESOURCE_QUOTA_KIND_PODS = os.environ.get("RESOURCE_QUOTA_KIND_PODS", "30")
+RESOURCE_QUOTA_KIND_PVC = os.environ.get("RESOURCE_QUOTA_KIND_PVC", "20")
+RESOURCE_QUOTA_KIND_SERVICES = os.environ.get("RESOURCE_QUOTA_KIND_SERVICES", "40")
+
+RESOURCE_QUOTA_EKS_REQUESTS_CPU = os.environ.get("RESOURCE_QUOTA_EKS_REQUESTS_CPU", "12")
+RESOURCE_QUOTA_EKS_REQUESTS_MEMORY = os.environ.get("RESOURCE_QUOTA_EKS_REQUESTS_MEMORY", "24Gi")
+RESOURCE_QUOTA_EKS_LIMITS_CPU = os.environ.get("RESOURCE_QUOTA_EKS_LIMITS_CPU", "24")
+RESOURCE_QUOTA_EKS_LIMITS_MEMORY = os.environ.get("RESOURCE_QUOTA_EKS_LIMITS_MEMORY", "48Gi")
 RESOURCE_QUOTA_EKS_PODS = os.environ.get("RESOURCE_QUOTA_EKS_PODS", "100")
+RESOURCE_QUOTA_EKS_PVC = os.environ.get("RESOURCE_QUOTA_EKS_PVC", "50")
+RESOURCE_QUOTA_EKS_SERVICES = os.environ.get("RESOURCE_QUOTA_EKS_SERVICES", "100")
 
 
 def log(msg: str) -> None:
@@ -112,12 +116,12 @@ def run_cmd(
         env=env,
     )
     if check and cp.returncode != 0:
-        detail = []
+        detail: list[str] = []
         if cp.stdout:
             detail.append(f"stdout:\n{cp.stdout.rstrip()}")
         if cp.stderr:
             detail.append(f"stderr:\n{cp.stderr.rstrip()}")
-        suffix = f"\n{'\n'.join(detail)}" if detail else ""
+        suffix = f"\n{chr(10).join(detail)}" if detail else ""
         raise RuntimeError(f"command failed ({cp.returncode}): {' '.join(args)}{suffix}")
     return cp
 
@@ -231,54 +235,144 @@ def import_check() -> None:
     log("import_ok")
 
 
-def resource_quota_expected() -> bool:
-    cp = run_cmd(
-        ["kubectl", "get", "resourcequota", RESOURCE_QUOTA_NAME, "-n", TASK_NAMESPACE, "-o", "name"],
-        check=False,
+def _quota_values() -> dict[str, str]:
+    if K8S_CLUSTER == "kind":
+        return {
+            "requests_cpu": RESOURCE_QUOTA_KIND_REQUESTS_CPU,
+            "requests_memory": RESOURCE_QUOTA_KIND_REQUESTS_MEMORY,
+            "limits_cpu": RESOURCE_QUOTA_KIND_LIMITS_CPU,
+            "limits_memory": RESOURCE_QUOTA_KIND_LIMITS_MEMORY,
+            "pods": RESOURCE_QUOTA_KIND_PODS,
+            "persistentvolumeclaims": RESOURCE_QUOTA_KIND_PVC,
+            "services": RESOURCE_QUOTA_KIND_SERVICES,
+        }
+    return {
+        "requests_cpu": RESOURCE_QUOTA_EKS_REQUESTS_CPU,
+        "requests_memory": RESOURCE_QUOTA_EKS_REQUESTS_MEMORY,
+        "limits_cpu": RESOURCE_QUOTA_EKS_LIMITS_CPU,
+        "limits_memory": RESOURCE_QUOTA_EKS_LIMITS_MEMORY,
+        "pods": RESOURCE_QUOTA_EKS_PODS,
+        "persistentvolumeclaims": RESOURCE_QUOTA_EKS_PVC,
+        "services": RESOURCE_QUOTA_EKS_SERVICES,
+    }
+
+
+def _ensure_namespace() -> None:
+    run_cmd(
+        [
+            "kubectl",
+            "create",
+            "namespace",
+            TASK_NAMESPACE,
+            "--dry-run=client",
+            "-o",
+            "yaml",
+        ],
+        check=True,
         capture_output=True,
     )
-    return bool(cp.stdout.strip())
+    run_cmd(
+        ["kubectl", "apply", "-f", "-"],
+        input_text=f"""apiVersion: v1
+kind: Namespace
+metadata:
+  name: {TASK_NAMESPACE}
+""",
+    )
 
 
-def ensure_namespace_bootstrap_ready() -> None:
+def _bootstrap_manifest() -> str:
+    q = _quota_values()
+    return f"""apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {SPARK_SERVICE_ACCOUNT}
+  namespace: {TASK_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {SPARK_SERVICE_ACCOUNT}
+  namespace: {TASK_NAMESPACE}
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - configmaps
+      - persistentvolumeclaims
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {SPARK_SERVICE_ACCOUNT}
+  namespace: {TASK_NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: {SPARK_SERVICE_ACCOUNT}
+    namespace: {TASK_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {SPARK_SERVICE_ACCOUNT}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {RESOURCE_QUOTA_NAME}
+  namespace: {TASK_NAMESPACE}
+spec:
+  hard:
+    requests.cpu: "{q["requests_cpu"]}"
+    requests.memory: "{q["requests_memory"]}"
+    limits.cpu: "{q["limits_cpu"]}"
+    limits.memory: "{q["limits_memory"]}"
+    pods: "{q["pods"]}"
+    persistentvolumeclaims: "{q["persistentvolumeclaims"]}"
+    services: "{q["services"]}"
+"""
+
+
+def bootstrap_manifest_quota_line() -> str:
+    q = _quota_values()
+    return (
+        f'requests.cpu={q["requests_cpu"]}, '
+        f'requests.memory={q["requests_memory"]}, '
+        f'limits.cpu={q["limits_cpu"]}, '
+        f'limits.memory={q["limits_memory"]}, '
+        f'pods={q["pods"]}, '
+        f'persistentvolumeclaims={q["persistentvolumeclaims"]}, '
+        f'services={q["services"]}'
+    )
+
+
+def bootstrap_target_namespace() -> None:
     require_bin("kubectl")
-    log(f"Verifying namespace bootstrap for {TASK_NAMESPACE}")
+    log(f"Applying namespace, RBAC, and quota bootstrap for {TASK_NAMESPACE}")
+    _ensure_namespace()
+    run_cmd(["kubectl", "apply", "-f", "-"], input_text=_bootstrap_manifest())
+    log(f"Bootstrap applied for {TASK_NAMESPACE} with quota: {bootstrap_manifest_quota_line()}")
 
-    ns = run_cmd(
-        ["kubectl", "get", "namespace", TASK_NAMESPACE],
-        check=False,
-        capture_output=True,
-    )
-    if ns.returncode != 0:
-        fatal(
-            f"namespace {TASK_NAMESPACE} does not exist. "
-            f"Run src/infra/core/spark_operator.sh --rollout first."
-        )
 
-    sa = run_cmd(
-        ["kubectl", "get", "serviceaccount", SPARK_SERVICE_ACCOUNT, "-n", TASK_NAMESPACE],
-        check=False,
-        capture_output=True,
-    )
-    if sa.returncode != 0:
-        fatal(
-            f"service account {SPARK_SERVICE_ACCOUNT} missing in {TASK_NAMESPACE}. "
-            f"Run src/infra/core/spark_operator.sh --rollout first."
-        )
-
-    if not resource_quota_expected():
-        fatal(
-            f"no ResourceQuota named {RESOURCE_QUOTA_NAME} found in {TASK_NAMESPACE}. "
-            f"Run src/infra/core/spark_operator.sh --rollout first."
-        )
-
-    can_i = run_cmd(
+def _can_i(verb: str, resource: str) -> bool:
+    cp = run_cmd(
         [
             "kubectl",
             "auth",
             "can-i",
-            "create",
-            "pods",
+            verb,
+            resource,
             "-n",
             TASK_NAMESPACE,
             f"--as=system:serviceaccount:{TASK_NAMESPACE}:{SPARK_SERVICE_ACCOUNT}",
@@ -286,44 +380,65 @@ def ensure_namespace_bootstrap_ready() -> None:
         check=False,
         capture_output=True,
     )
-    if can_i.returncode != 0 or can_i.stdout.strip() != "yes":
+    return cp.returncode == 0 and cp.stdout.strip() == "yes"
+
+
+def ensure_namespace_bootstrap_ready() -> None:
+    require_bin("kubectl")
+    log(f"Verifying namespace bootstrap for {TASK_NAMESPACE}")
+
+    bootstrap_target_namespace()
+
+    sa = run_cmd(
+        ["kubectl", "get", "serviceaccount", SPARK_SERVICE_ACCOUNT, "-n", TASK_NAMESPACE],
+        check=False,
+        capture_output=True,
+    )
+    if sa.returncode != 0:
+        fatal(f"service account {SPARK_SERVICE_ACCOUNT} missing in {TASK_NAMESPACE}")
+
+    rq = run_cmd(
+        ["kubectl", "get", "resourcequota", RESOURCE_QUOTA_NAME, "-n", TASK_NAMESPACE],
+        check=False,
+        capture_output=True,
+    )
+    if rq.returncode != 0:
+        fatal(f"resource quota {RESOURCE_QUOTA_NAME} missing in {TASK_NAMESPACE}")
+
+    required_resources = [
+        "pods",
+        "services",
+        "configmaps",
+        "persistentvolumeclaims",
+    ]
+    required_verbs = [
+        "get",
+        "list",
+        "watch",
+        "create",
+        "update",
+        "patch",
+        "delete",
+        "deletecollection",
+    ]
+    missing: list[str] = []
+    for resource in required_resources:
+        for verb in required_verbs:
+            if not _can_i(verb, resource):
+                missing.append(f"{verb} {resource}")
+    if not _can_i("get", "pods/log"):
+        missing.append("get pods/log")
+
+    if missing:
         fatal(
-            f"service account {SPARK_SERVICE_ACCOUNT} cannot create pods in {TASK_NAMESPACE}. "
-            f"Run src/infra/core/spark_operator.sh --rollout first."
+            "service account lacks required Spark permissions: "
+            + ", ".join(missing)
         )
 
     log(f"Bootstrap verified for {TASK_NAMESPACE}")
 
 
-def bootstrap_manifest_quota_line() -> str:
-    if K8S_CLUSTER == "kind":
-        return (
-            "requests.cpu: "
-            f"{RESOURCE_QUOTA_KIND_REQUESTS_CPU}, "
-            "requests.memory: "
-            f"{RESOURCE_QUOTA_KIND_REQUESTS_MEMORY}, "
-            "limits.cpu: "
-            f"{RESOURCE_QUOTA_KIND_LIMITS_CPU}, "
-            "limits.memory: "
-            f"{RESOURCE_QUOTA_KIND_LIMITS_MEMORY}, "
-            "pods: "
-            f"{RESOURCE_QUOTA_KIND_PODS}"
-        )
-    return (
-        "requests.cpu: "
-        f"{RESOURCE_QUOTA_EKS_REQUESTS_CPU}, "
-        "requests.memory: "
-        f"{RESOURCE_QUOTA_EKS_REQUESTS_MEMORY}, "
-        "limits.cpu: "
-        f"{RESOURCE_QUOTA_EKS_LIMITS_CPU}, "
-        "limits.memory: "
-        f"{RESOURCE_QUOTA_EKS_LIMITS_MEMORY}, "
-        "pods: "
-        f"{RESOURCE_QUOTA_EKS_PODS}"
-    )
-
-
-def _registration_tree_files() -> list[Path]:
+def registration_tree_files() -> list[Path]:
     files: list[Path] = []
     for path in sorted((SRC_ROOT / "workflows" / "ELT").rglob("*.py")):
         if "__pycache__" in path.parts or "ops" in path.parts:
@@ -336,7 +451,7 @@ def _registration_tree_files() -> list[Path]:
 def compute_registration_version() -> str:
     git_sha = run_cmd(["git", "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     tree = hashlib.sha256()
-    for path in _registration_tree_files():
+    for path in registration_tree_files():
         tree.update(path.relative_to(REPO_ROOT).as_posix().encode("utf-8"))
         tree.update(b"\0")
         tree.update(path.read_bytes())
@@ -403,8 +518,6 @@ def build_register_command(registration_version: str) -> list[str]:
 
 
 def write_helm_values_file(values_file: Path) -> None:
-    job_namespaces = [TASK_NAMESPACE]
-
     if K8S_CLUSTER == "kind":
         metrics = "false"
         webhook = "true"
@@ -412,106 +525,26 @@ def write_helm_values_file(values_file: Path) -> None:
         metrics = "true"
         webhook = "true"
 
-    lines = [
-        "hook:",
-        "  upgradeCrd: true",
-        "",
-        "webhook:",
-        f"  enable: {webhook}",
-        "",
-        "prometheus:",
-        "  metrics:",
-        f"    enable: {metrics}",
-        "",
-        "spark:",
-        "  serviceAccount:",
-        "    create: false",
-        f"    name: {SPARK_SERVICE_ACCOUNT}",
-        "  rbac:",
-        "    create: false",
-        "  jobNamespaces:",
-    ]
+    values = f"""hook:
+  upgradeCrd: true
 
-    for ns in job_namespaces:
-        lines.append(f'    - "{ns}"')
+webhook:
+  enable: {webhook}
 
-    values_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+prometheus:
+  metrics:
+    enable: {metrics}
 
-
-def bootstrap_target_namespace() -> None:
-    log(f"Applying namespace and Spark RBAC bootstrap for {TASK_NAMESPACE}")
-
-    run_cmd(
-        [
-            "kubectl",
-            "apply",
-            "-f",
-            "-",
-        ],
-        input_text=f"""apiVersion: v1
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {SPARK_SERVICE_ACCOUNT}
-  namespace: {TASK_NAMESPACE}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {SPARK_SERVICE_ACCOUNT}
-  namespace: {TASK_NAMESPACE}
-rules:
-  - apiGroups: [""]
-    resources:
-      - pods
-      - pods/log
-      - services
-      - configmaps
-      - events
-    verbs:
-      - get
-      - list
-      - watch
-      - create
-      - update
-      - patch
-      - delete
-      - deletecollection   # REQUIRED for Spark cleanup
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {SPARK_SERVICE_ACCOUNT}
-  namespace: {TASK_NAMESPACE}
-subjects:
-  - kind: ServiceAccount
+spark:
+  serviceAccount:
+    create: false
     name: {SPARK_SERVICE_ACCOUNT}
-    namespace: {TASK_NAMESPACE}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {SPARK_SERVICE_ACCOUNT}
-""",
-    )
-
-    run_cmd(
-        ["kubectl", "apply", "-f", "-"],
-        input_text=f"""apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: {RESOURCE_QUOTA_NAME}
-  namespace: {TASK_NAMESPACE}
-spec:
-  hard:
-    requests.cpu: "{RESOURCE_QUOTA_KIND_REQUESTS_CPU if K8S_CLUSTER == 'kind' else RESOURCE_QUOTA_EKS_REQUESTS_CPU}"
-    requests.memory: "{RESOURCE_QUOTA_KIND_REQUESTS_MEMORY if K8S_CLUSTER == 'kind' else RESOURCE_QUOTA_EKS_REQUESTS_MEMORY}"
-    limits.cpu: "{RESOURCE_QUOTA_KIND_LIMITS_CPU if K8S_CLUSTER == 'kind' else RESOURCE_QUOTA_EKS_LIMITS_CPU}"
-    limits.memory: "{RESOURCE_QUOTA_KIND_LIMITS_MEMORY if K8S_CLUSTER == 'kind' else RESOURCE_QUOTA_EKS_LIMITS_MEMORY}"
-    pods: "{RESOURCE_QUOTA_KIND_PODS if K8S_CLUSTER == 'kind' else RESOURCE_QUOTA_EKS_PODS}"
-""",
-    )
-
-    log(f"Bootstrap verified for {TASK_NAMESPACE} with quota: {bootstrap_manifest_quota_line()}")
+  rbac:
+    create: false
+  jobNamespaces:
+    - "{TASK_NAMESPACE}"
+"""
+    values_file.write_text(values, encoding="utf-8")
 
 
 def register_entities() -> str:
@@ -590,11 +623,7 @@ def create_execution_from_spec(exec_spec_file: Path) -> None:
     )
 
 
-def execute_launch_plan(
-    *,
-    latest: bool | None = None,
-    version: str | None = None,
-) -> None:
+def execute_launch_plan(*, latest: bool | None = None, version: str | None = None) -> None:
     require_bin("kubectl")
     require_bin("flytectl")
 
@@ -605,9 +634,7 @@ def execute_launch_plan(
 
     launch_plan_name = resolve_elt_launchplan_name()
     effective_latest = USE_LATEST if latest is None else latest
-    effective_version = version if version is not None else (
-        None if effective_latest else compute_registration_version()
-    )
+    effective_version = version if version is not None else (None if effective_latest else compute_registration_version())
 
     if not effective_latest and not effective_version:
         fatal("launch-plan version required when latest is disabled")
@@ -857,7 +884,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     require_bin("kubectl")
     require_bin("git")
-    require_bin("python")
+    require_bin("python3")
 
     if args.command == "register":
         lint_sources()

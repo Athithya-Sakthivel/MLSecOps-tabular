@@ -6,6 +6,7 @@
 # - Iceberg + Hadoop AWS runtime jars
 # - writable cache directories for Hugging Face / datasets
 # FROM apache/spark:4.0.2-scala2.13-java21-python3-ubuntu
+
 FROM apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
 
 USER root
@@ -36,8 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep /opt/venv because the current Flyte Spark task config uses:
-# executor_path="/opt/venv/bin/python"
 RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
