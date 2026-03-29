@@ -19,9 +19,6 @@ from workflows.ELT.tasks.bronze_ingest import (
     CATALOG_NAME,
     GOLD_CONTRACT_TABLE,
     GOLD_TRAINING_TABLE,
-    ICEBERG_EXPIRE_DAYS,
-    ICEBERG_ORPHAN_DAYS,
-    ICEBERG_RETAIN_LAST,
     SILVER_TRIPS_TABLE,
     TASK_IMAGE,
     build_hadoop_conf,
@@ -45,6 +42,10 @@ ELT_PROFILE = os.environ.get(
     "ELT_PROFILE",
     "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
 ).strip().lower()
+
+ICEBERG_EXPIRE_DAYS = int(os.environ.get("ICEBERG_EXPIRE_DAYS", "7"))
+ICEBERG_ORPHAN_DAYS = int(os.environ.get("ICEBERG_ORPHAN_DAYS", "3"))
+ICEBERG_RETAIN_LAST = int(os.environ.get("ICEBERG_RETAIN_LAST", "2"))
 
 if ELT_PROFILE == "prod":
     TASK_LIMITS = Resources(cpu="1000m", mem="768Mi")

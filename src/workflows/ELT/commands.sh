@@ -1,5 +1,3 @@
-
-
 bash -lc 'set -Eeuo pipefail
 source .venv_elt/bin/activate
 export ELT_PROFILE="staging"

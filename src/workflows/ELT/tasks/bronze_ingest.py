@@ -24,9 +24,13 @@ LOG.handlers[:] = [_handler]
 LOG.propagate = False
 
 CATALOG_NAME = os.environ.get("ICEBERG_CATALOG", "iceberg")
-ICEBERG_WAREHOUSE = os.environ.get(
-    "ICEBERG_WAREHOUSE",
-    "s3://e2e-mlops-data-681802563986/iceberg/warehouse/",
+ICEBERG_WAREHOUSE = (
+    os.environ.get(
+        "ICEBERG_WAREHOUSE",
+        "s3://e2e-mlops-data-681802563986/iceberg/warehouse/",
+    )
+    .rstrip("/")
+    + "/"
 )
 ICEBERG_REST_URI = os.environ.get(
     "ICEBERG_REST_URI",
@@ -42,13 +46,18 @@ ELT_PROFILE = os.environ.get(
     "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
 ).strip().lower()
 
-AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-south-1"
-AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("aws_access_key_id", "")
-AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY") or os.environ.get("aws_secret_access_key", "")
-AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN") or os.environ.get("aws_session_token", "")
-AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN") or os.environ.get("aws_role_arn", "")
-S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
-S3_PATH_STYLE_ACCESS = os.environ.get("S3_PATH_STYLE_ACCESS", "false")
+AWS_DEFAULT_REGION = (
+    os.environ.get("AWS_DEFAULT_REGION")
+    or os.environ.get("AWS_REGION")
+    or "ap-south-1"
+).strip()
+AWS_REGION = (os.environ.get("AWS_REGION") or AWS_DEFAULT_REGION).strip()
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN", "").strip()
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").strip()
+S3_PATH_STYLE_ACCESS = os.environ.get("S3_PATH_STYLE_ACCESS", "false").strip().lower()
 
 BRONZE_NAMESPACE = os.environ.get("BRONZE_NAMESPACE", "bronze")
 SILVER_NAMESPACE = os.environ.get("SILVER_NAMESPACE", "silver")
@@ -204,6 +213,36 @@ def table_exists(spark: SparkSession, table_id: str) -> bool:
     return len(rows) > 0
 
 
+def build_aws_runtime_env() -> dict[str, str]:
+    env = {
+        "AWS_DEFAULT_REGION": AWS_DEFAULT_REGION,
+        "AWS_REGION": AWS_REGION,
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+        env["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
+        env["AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
+        if AWS_SESSION_TOKEN:
+            env["AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
+
+    return env
+
+
+def _spark_s3a_credential_provider() -> str:
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+        return (
+            "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider"
+            if AWS_SESSION_TOKEN
+            else "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+        )
+    return "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+
+
+def build_task_environment() -> dict[str, str]:
+    return build_aws_runtime_env()
+
+
 def build_spark_conf(
     *,
     spark_driver_memory: str,
@@ -218,6 +257,9 @@ def build_spark_conf(
     spark_max_result_size: str,
     spark_task_max_failures: str = "4",
 ) -> dict[str, str]:
+    aws_env = build_aws_runtime_env()
+    s3a_provider = _spark_s3a_credential_provider()
+
     conf = {
         f"spark.sql.catalog.{CATALOG_NAME}": "org.apache.iceberg.spark.SparkCatalog",
         f"spark.sql.catalog.{CATALOG_NAME}.type": "rest",
@@ -252,21 +294,28 @@ def build_spark_conf(
         "spark.task.maxFailures": spark_task_max_failures,
         "spark.excludeOnFailure.enabled": "true",
         "spark.excludeOnFailure.timeout": "5m",
+        "spark.hadoop.fs.s3a.aws.credentials.provider": s3a_provider,
         "spark.hadoop.fs.s3a.endpoint.region": AWS_REGION,
+        "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     }
 
+    if S3_ENDPOINT:
+        conf["spark.hadoop.fs.s3a.endpoint"] = S3_ENDPOINT
+        conf["spark.hadoop.fs.s3a.path.style.access"] = S3_PATH_STYLE_ACCESS
+    else:
+        conf["spark.hadoop.fs.s3a.endpoint"] = f"s3.{AWS_REGION}.amazonaws.com"
+        conf["spark.hadoop.fs.s3a.path.style.access"] = "false"
+
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
-        conf["spark.kubernetes.driverEnv.AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
-        conf["spark.kubernetes.driverEnv.AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
-        conf["spark.kubernetes.driverEnv.AWS_DEFAULT_REGION"] = AWS_REGION
-        conf["spark.kubernetes.driverEnv.AWS_REGION"] = AWS_REGION
-        conf["spark.executorEnv.AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
-        conf["spark.executorEnv.AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
-        conf["spark.executorEnv.AWS_DEFAULT_REGION"] = AWS_REGION
-        conf["spark.executorEnv.AWS_REGION"] = AWS_REGION
+        conf["spark.hadoop.fs.s3a.access.key"] = AWS_ACCESS_KEY_ID
+        conf["spark.hadoop.fs.s3a.secret.key"] = AWS_SECRET_ACCESS_KEY
         if AWS_SESSION_TOKEN:
-            conf["spark.kubernetes.driverEnv.AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
-            conf["spark.executorEnv.AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
+            conf["spark.hadoop.fs.s3a.session.token"] = AWS_SESSION_TOKEN
+
+    for key, value in aws_env.items():
+        if value:
+            conf[f"spark.kubernetes.driverEnv.{key}"] = value
+            conf[f"spark.executorEnv.{key}"] = value
 
     if ICEBERG_REST_AUTH_TYPE:
         conf[f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.type"] = ICEBERG_REST_AUTH_TYPE
@@ -280,25 +329,20 @@ def build_spark_conf(
 def build_hadoop_conf() -> dict[str, str]:
     conf = {
         "fs.s3a.endpoint.region": AWS_REGION,
-        "fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.DefaultAWSCredentialsProviderChain",
+        "fs.s3a.aws.credentials.provider": _spark_s3a_credential_provider(),
+        "fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
     }
+
     if S3_ENDPOINT:
         conf["fs.s3a.endpoint"] = S3_ENDPOINT
         conf["fs.s3a.path.style.access"] = S3_PATH_STYLE_ACCESS
     else:
+        conf["fs.s3a.endpoint"] = f"s3.{AWS_REGION}.amazonaws.com"
         conf["fs.s3a.path.style.access"] = "false"
 
-    has_web_identity = bool(os.environ.get("AWS_WEB_IDENTITY_TOKEN_FILE"))
-    has_role_based_auth = bool(AWS_ROLE_ARN)
-
-    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and not has_web_identity and not has_role_based_auth:
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         conf["fs.s3a.access.key"] = AWS_ACCESS_KEY_ID
         conf["fs.s3a.secret.key"] = AWS_SECRET_ACCESS_KEY
-        conf["fs.s3a.aws.credentials.provider"] = (
-            "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider"
-            if AWS_SESSION_TOKEN
-            else "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-        )
         if AWS_SESSION_TOKEN:
             conf["fs.s3a.session.token"] = AWS_SESSION_TOKEN
 
@@ -562,6 +606,7 @@ def detect_aws_credential_mode() -> str:
         executor_path="/opt/venv/bin/python",
     ),
     container_image=TASK_IMAGE,
+    environment=build_task_environment(),
     retries=TASK_RETRIES,
     limits=TASK_LIMITS,
 )

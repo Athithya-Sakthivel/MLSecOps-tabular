@@ -6,6 +6,7 @@ import functools
 import hashlib
 import importlib
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -41,7 +42,8 @@ ELT_TASK_IMAGE = os.environ.get(
 if not ELT_TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must not be empty")
 
-WORKFLOW_SOURCE_FILE = REPO_ROOT / "src" / "workflows" / "ELT" / "launch_plans.py"
+WORKFLOW_SOURCE_FILE = SRC_ROOT / "workflows" / "ELT" / "launch_plans.py"
+WORKFLOW_SOURCE_REL = WORKFLOW_SOURCE_FILE.relative_to(SRC_ROOT)
 WORKFLOW_IMPORT_MODULE = os.environ.get("WORKFLOW_IMPORT_MODULE", "workflows.ELT.launch_plans")
 
 USE_PORT_FORWARD = os.environ.get("USE_PORT_FORWARD", "1").lower() in {"1", "true", "yes", "y", "on"}
@@ -49,9 +51,7 @@ FLYTE_ADMIN_NAMESPACE = os.environ.get("FLYTE_ADMIN_NAMESPACE", "flyte")
 FLYTE_ADMIN_HOST = os.environ.get("FLYTE_ADMIN_HOST", "127.0.0.1")
 FLYTE_ADMIN_PORT = int(os.environ.get("FLYTE_ADMIN_PORT", "30081"))
 PORT_FORWARD_TARGET_PORT = int(os.environ.get("PORT_FORWARD_TARGET_PORT", "81"))
-PORT_FORWARD_PID_FILE = Path(
-    os.environ.get("PORT_FORWARD_PID_FILE", "/tmp/flyteadmin-portforward.pid")
-)
+PORT_FORWARD_PID_FILE = Path(os.environ.get("PORT_FORWARD_PID_FILE", "/tmp/flyteadmin-portforward.pid"))
 PORT_FORWARD_LOG = Path(os.environ.get("PORT_FORWARD_LOG", "/tmp/flyteadmin-portforward.log"))
 
 ACTIVATE_LAUNCHPLANS = os.environ.get("ACTIVATE_LAUNCHPLANS", "0").lower() in {
@@ -62,6 +62,9 @@ ACTIVATE_LAUNCHPLANS = os.environ.get("ACTIVATE_LAUNCHPLANS", "0").lower() in {
     "on",
 }
 USE_LATEST = os.environ.get("USE_LATEST", "0").lower() in {"1", "true", "yes", "y", "on"}
+
+# Optional extra args appended to `pyflyte register`.
+PYFLYTE_REGISTER_EXTRA_ARGS = os.environ.get("PYFLYTE_REGISTER_EXTRA_ARGS", "").strip()
 
 RESOURCE_QUOTA_NAME = os.environ.get("RESOURCE_QUOTA_NAME", "spark-workload-quota")
 RESOURCE_QUOTA_KIND_REQUESTS_CPU = os.environ.get("RESOURCE_QUOTA_KIND_REQUESTS_CPU", "2")
@@ -97,6 +100,7 @@ def run_cmd(
     cwd: Path | None = None,
     input_text: str | None = None,
     capture_output: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     cp = subprocess.run(
         list(args),
@@ -105,6 +109,7 @@ def run_cmd(
         input=input_text,
         capture_output=capture_output,
         check=False,
+        env=env,
     )
     if check and cp.returncode != 0:
         detail = []
@@ -187,8 +192,8 @@ def start_port_forward() -> None:
     tail = ""
     if PORT_FORWARD_LOG.is_file():
         try:
-            tail = PORT_FORWARD_LOG.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
-            tail = "\n".join(tail)
+            tail_lines = PORT_FORWARD_LOG.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
+            tail = "\n".join(tail_lines)
         except Exception:
             tail = ""
     stop_port_forward_if_any()
@@ -228,7 +233,7 @@ def import_check() -> None:
 
 def resource_quota_expected() -> bool:
     cp = run_cmd(
-        ["kubectl", "get", "resourcequota", "-n", TASK_NAMESPACE, "-o", "name"],
+        ["kubectl", "get", "resourcequota", RESOURCE_QUOTA_NAME, "-n", TASK_NAMESPACE, "-o", "name"],
         check=False,
         capture_output=True,
     )
@@ -263,7 +268,7 @@ def ensure_namespace_bootstrap_ready() -> None:
 
     if not resource_quota_expected():
         fatal(
-            f"no ResourceQuota found in {TASK_NAMESPACE}. "
+            f"no ResourceQuota named {RESOURCE_QUOTA_NAME} found in {TASK_NAMESPACE}. "
             f"Run src/infra/core/spark_operator.sh --rollout first."
         )
 
@@ -351,6 +356,50 @@ def resolve_elt_launchplan_name() -> str:
     if not isinstance(name, str) or not name.strip():
         fatal("could not resolve ELT launch plan name")
     return name.strip()
+
+
+def pyflyte_register_supports_copy_or_fast_flag() -> tuple[bool, bool]:
+    help_text = run_cmd(["pyflyte", "register", "--help"], check=False, capture_output=True)
+    combined = f"{help_text.stdout}\n{help_text.stderr}"
+    return ("--copy" in combined, "--fast" in combined)
+
+
+def build_register_command(registration_version: str) -> list[str]:
+    cmd = [
+        "pyflyte",
+        "register",
+        "--project",
+        REMOTE_PROJECT,
+        "--domain",
+        REMOTE_DOMAIN,
+        "--image",
+        ELT_TASK_IMAGE,
+        "--version",
+        registration_version,
+        "--service-account",
+        SPARK_SERVICE_ACCOUNT,
+    ]
+
+    supports_copy, supports_fast = pyflyte_register_supports_copy_or_fast_flag()
+
+    if supports_copy:
+        cmd.extend(["--copy", "none"])
+    elif supports_fast:
+        cmd.append("--fast=false")
+    else:
+        fatal(
+            "installed pyflyte register does not advertise --copy or --fast; "
+            "cannot safely disable fast registration"
+        )
+
+    if PYFLYTE_REGISTER_EXTRA_ARGS:
+        cmd.extend(shlex.split(PYFLYTE_REGISTER_EXTRA_ARGS))
+
+    if ACTIVATE_LAUNCHPLANS:
+        cmd.append("--activate-launchplans")
+
+    cmd.append(str(WORKFLOW_SOURCE_REL))
+    return cmd
 
 
 def write_helm_values_file(values_file: Path) -> None:
@@ -465,26 +514,14 @@ def register_entities() -> str:
     log(f"Profile: {ELT_PROFILE} | Cluster: {K8S_CLUSTER} | Namespace: {TASK_NAMESPACE}")
     log(f"Registration version: {registration_version}")
 
-    cmd = [
-        "pyflyte",
-        "register",
-        "--project",
-        REMOTE_PROJECT,
-        "--domain",
-        REMOTE_DOMAIN,
-        "--image",
-        ELT_TASK_IMAGE,
-        "--version",
-        registration_version,
-        "--service-account",
-        SPARK_SERVICE_ACCOUNT,
-    ]
+    register_env = os.environ.copy()
+    existing_pythonpath = register_env.get("PYTHONPATH", "")
+    register_env["PYTHONPATH"] = str(SRC_ROOT) + (
+        os.pathsep + existing_pythonpath if existing_pythonpath else ""
+    )
 
-    if ACTIVATE_LAUNCHPLANS:
-        cmd.append("--activate-launchplans")
-
-    cmd.append(str(WORKFLOW_SOURCE_FILE))
-    run_cmd(cmd)
+    cmd = build_register_command(registration_version)
+    run_cmd(cmd, cwd=SRC_ROOT, env=register_env)
 
     log(f"Registration complete for version {registration_version}")
     return registration_version

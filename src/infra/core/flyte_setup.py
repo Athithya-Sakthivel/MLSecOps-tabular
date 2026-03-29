@@ -339,7 +339,7 @@ def ensure_database(db_name: str) -> None:
     ).strip()
 
     if exists != "1":
-        log(f"creating database {db_name}")
+        log(f"creating database {db_name} if not exist")
         run(
             [
                 "kubectl",
