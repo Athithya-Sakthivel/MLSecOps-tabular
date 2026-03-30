@@ -45,7 +45,6 @@ ELT_PROFILE = os.environ.get(
     "ELT_PROFILE",
     "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
 ).strip().lower()
-IS_PROD = ELT_PROFILE == "prod"
 
 ICEBERG_EXPIRE_DAYS = int(os.environ.get("ICEBERG_EXPIRE_DAYS", "7"))
 ICEBERG_ORPHAN_DAYS = int(os.environ.get("ICEBERG_ORPHAN_DAYS", "3"))
@@ -54,13 +53,17 @@ ICEBERG_RETAIN_LAST = max(1, int(os.environ.get("ICEBERG_RETAIN_LAST", "2")))
 DEFAULT_REWRITE_WHERE = "as_of_date >= date_sub(current_date(), 30)"
 
 
-def _env_int(name: str, default: int, minimum: int = 0) -> int:
-    value = int(os.environ.get(name, str(default)))
-    return max(value, minimum)
-
-
-def _env_str(name: str, default: str) -> str:
-    return os.environ.get(name, default).strip()
+@dataclass(frozen=True)
+class MaintenanceResult:
+    run_id: str
+    status: str
+    expired_tables: str
+    rewritten_tables: str
+    skipped_tables: str
+    failed_tables: str
+    table_results_json: str
+    expire_days: int
+    orphan_days: int
 
 
 def parse_bool(value: str | None, *, default: bool = False) -> bool:
@@ -90,31 +93,14 @@ def utc_cutoff_string(days: int) -> str:
     return cutoff.strftime("%Y-%m-%d %H:%M:%S")
 
 
-@dataclass(frozen=True)
-class MaintenanceResult:
-    run_id: str
-    status: str
-    expired_tables: str
-    rewritten_tables: str
-    skipped_tables: str
-    failed_tables: str
-    table_results_json: str
-    expire_days: int
-    orphan_days: int
-
-
 def execute_sql_action(spark: SparkSession, statement: str) -> None:
     spark.sql(statement).collect()
-
-
-def escape_sql_literal(value: str) -> str:
-    return value.replace("'", "''")
 
 
 def expire_snapshots_call(table_id: str, older_than: str) -> str:
     return (
         f"CALL {CATALOG_NAME}.system.expire_snapshots("
-        f"table => '{escape_sql_literal(table_id)}', "
+        f"table => '{table_id}', "
         f"older_than => TIMESTAMP '{older_than}', "
         f"retain_last => {ICEBERG_RETAIN_LAST}, "
         f"clean_expired_metadata => true, "
@@ -125,7 +111,7 @@ def expire_snapshots_call(table_id: str, older_than: str) -> str:
 def remove_orphan_files_call(table_id: str, older_than: str) -> str:
     return (
         f"CALL {CATALOG_NAME}.system.remove_orphan_files("
-        f"table => '{escape_sql_literal(table_id)}', "
+        f"table => '{table_id}', "
         f"older_than => TIMESTAMP '{older_than}', "
         f"dry_run => false, "
         f"prefix_mismatch_mode => 'IGNORE')"
@@ -136,7 +122,7 @@ def rewrite_data_files_call(table_id: str, where_clause: str) -> str:
     escaped_where = where_clause.replace("'", "''")
     return (
         f"CALL {CATALOG_NAME}.system.rewrite_data_files("
-        f"table => '{escape_sql_literal(table_id)}', "
+        f"table => '{table_id}', "
         f"where => '{escaped_where}', "
         "options => map("
         "'min-input-files', '2', "
@@ -174,8 +160,6 @@ def parse_table_predicate_map(env_name: str) -> dict[str, str]:
 
 
 def table_has_column(spark: SparkSession, table_id: str, column: str) -> bool:
-    if not table_exists(spark, table_id):
-        return False
     return column in spark.table(table_id).columns
 
 
@@ -193,28 +177,28 @@ def default_rewrite_predicates() -> dict[str, str]:
 
 
 def maintenance_spark_conf() -> dict[str, str]:
-    if IS_PROD:
-        spark_driver_memory = _env_str("SPARK_DRIVER_MEMORY", "1g")
-        spark_executor_memory = _env_str("SPARK_EXECUTOR_MEMORY", "1g")
-        spark_driver_memory_overhead = _env_str("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
-        spark_executor_memory_overhead = _env_str("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
-        spark_executor_cores = _env_str("SPARK_EXECUTOR_CORES", "1")
-        spark_executor_instances = _env_str("SPARK_EXECUTOR_INSTANCES", "1")
-        spark_driver_cores = _env_str("SPARK_DRIVER_CORES", "1")
-        spark_shuffle_partitions = _env_str("SPARK_SHUFFLE_PARTITIONS", "4")
-        spark_max_partition_bytes = _env_str("SPARK_MAX_PARTITION_BYTES", "134217728")
-        spark_max_result_size = _env_str("SPARK_MAX_RESULT_SIZE", "256m")
+    if ELT_PROFILE == "prod":
+        spark_driver_memory = os.environ.get("SPARK_DRIVER_MEMORY", "1g")
+        spark_executor_memory = os.environ.get("SPARK_EXECUTOR_MEMORY", "1g")
+        spark_driver_memory_overhead = os.environ.get("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
+        spark_executor_memory_overhead = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
+        spark_executor_cores = os.environ.get("SPARK_EXECUTOR_CORES", "1")
+        spark_executor_instances = os.environ.get("SPARK_EXECUTOR_INSTANCES", "1")
+        spark_driver_cores = os.environ.get("SPARK_DRIVER_CORES", "1")
+        spark_shuffle_partitions = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+        spark_max_partition_bytes = os.environ.get("SPARK_MAX_PARTITION_BYTES", "134217728")
+        spark_max_result_size = os.environ.get("SPARK_MAX_RESULT_SIZE", "256m")
     else:
-        spark_driver_memory = _env_str("SPARK_DRIVER_MEMORY", "768m")
-        spark_executor_memory = _env_str("SPARK_EXECUTOR_MEMORY", "512m")
-        spark_driver_memory_overhead = _env_str("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
-        spark_executor_memory_overhead = _env_str("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
-        spark_executor_cores = _env_str("SPARK_EXECUTOR_CORES", "1")
-        spark_executor_instances = _env_str("SPARK_EXECUTOR_INSTANCES", "1")
-        spark_driver_cores = _env_str("SPARK_DRIVER_CORES", "1")
-        spark_shuffle_partitions = _env_str("SPARK_SHUFFLE_PARTITIONS", "4")
-        spark_max_partition_bytes = _env_str("SPARK_MAX_PARTITION_BYTES", "67108864")
-        spark_max_result_size = _env_str("SPARK_MAX_RESULT_SIZE", "128m")
+        spark_driver_memory = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
+        spark_executor_memory = os.environ.get("SPARK_EXECUTOR_MEMORY", "512m")
+        spark_driver_memory_overhead = os.environ.get("SPARK_DRIVER_MEMORY_OVERHEAD", "256m")
+        spark_executor_memory_overhead = os.environ.get("SPARK_EXECUTOR_MEMORY_OVERHEAD", "256m")
+        spark_executor_cores = os.environ.get("SPARK_EXECUTOR_CORES", "1")
+        spark_executor_instances = os.environ.get("SPARK_EXECUTOR_INSTANCES", "1")
+        spark_driver_cores = os.environ.get("SPARK_DRIVER_CORES", "1")
+        spark_shuffle_partitions = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+        spark_max_partition_bytes = os.environ.get("SPARK_MAX_PARTITION_BYTES", "67108864")
+        spark_max_result_size = os.environ.get("SPARK_MAX_RESULT_SIZE", "128m")
 
     return build_spark_conf(
         spark_driver_memory=spark_driver_memory,
@@ -238,10 +222,10 @@ def maintenance_spark_conf() -> dict[str, str]:
     ),
     container_image=TASK_IMAGE,
     environment=build_task_environment(),
-    retries=_env_int("MAINTENANCE_TASK_RETRIES", 1, minimum=0),
+    retries=int(os.environ.get("MAINTENANCE_TASK_RETRIES", "1")),
     limits=Resources(
-        cpu="1000m" if IS_PROD else "500m",
-        mem="1024Mi" if IS_PROD else "768Mi",
+        cpu="1000m" if ELT_PROFILE == "prod" else "500m",
+        mem="768Mi" if ELT_PROFILE != "prod" else "1024Mi",
     ),
 )
 def maintenance_optimize() -> MaintenanceResult:
@@ -400,7 +384,9 @@ def maintenance_optimize() -> MaintenanceResult:
             continue
 
         try:
-            if "as_of_date" in where_clause and not table_has_column(spark, table_id, "as_of_date"):
+            if "as_of_date" in where_clause and not table_has_column(
+                spark, table_id, "as_of_date"
+            ):
                 skipped.append(table_id)
                 table_results.append(
                     table_op_result(

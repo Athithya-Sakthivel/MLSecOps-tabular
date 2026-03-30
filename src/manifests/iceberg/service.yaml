@@ -9,5 +9,5 @@ spec:
     app: iceberg-rest
   ports:
   - name: http
-    port: 9001
-    targetPort: 9001
+    port: 8181
+    targetPort: 8181

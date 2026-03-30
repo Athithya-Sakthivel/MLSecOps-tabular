@@ -30,7 +30,7 @@ CATALOG_NAME = os.environ.get("ICEBERG_CATALOG", "iceberg").strip()
 ICEBERG_REST_URI = (
     os.environ.get(
         "ICEBERG_REST_URI",
-        "http://iceberg-rest.default.svc.cluster.local:9001/iceberg",
+        "http://iceberg-rest.default.svc.cluster.local:8181",
     )
     .strip()
     .rstrip("/")
@@ -67,6 +67,7 @@ AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "").strip()
 AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN", "").strip()
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").strip()
 S3_PATH_STYLE_ACCESS = os.environ.get("S3_PATH_STYLE_ACCESS", "false").strip().lower()
+SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark").strip() or "spark"
 
 BRONZE_NAMESPACE = os.environ.get("BRONZE_NAMESPACE", "bronze").strip()
 SILVER_NAMESPACE = os.environ.get("SILVER_NAMESPACE", "silver").strip()
@@ -105,10 +106,7 @@ TAXI_ZONE_LOOKUP_URL = os.environ.get(
 ).strip()
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or None
 
-TASK_IMAGE = os.environ.get(
-    "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-29-08-46--23128af@sha256:ebf5406cfe3aa4507e110229dbcbb47be433bf971eeedc7d5edf38bfc6c897e2",
-).strip()
+TASK_IMAGE = os.environ.get("ELT_TASK_IMAGE", "").strip()
 if not TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must be set before importing bronze_ingest.py")
 
@@ -289,6 +287,10 @@ def build_aws_runtime_env() -> dict[str, str]:
         "AWS_DEFAULT_REGION": AWS_DEFAULT_REGION,
         "AWS_REGION": AWS_REGION,
         "AWS_EC2_METADATA_DISABLED": "true",
+        "ICEBERG_CATALOG": CATALOG_NAME,
+        "ICEBERG_REST_URI": ICEBERG_REST_URI,
+        "ICEBERG_REST_AUTH_TYPE": ICEBERG_REST_AUTH_TYPE,
+        "ICEBERG_WAREHOUSE": ICEBERG_WAREHOUSE,
     }
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         env["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
@@ -351,6 +353,7 @@ def build_spark_conf(
 ) -> dict[str, str]:
     aws_env = build_aws_runtime_env()
     s3a_provider = _spark_s3a_credential_provider()
+    spark_service_account = SPARK_SERVICE_ACCOUNT
 
     conf = {
         f"spark.sql.catalog.{CATALOG_NAME}": "org.apache.iceberg.spark.SparkCatalog",
@@ -375,14 +378,8 @@ def build_spark_conf(
         "spark.executor.instances": spark_executor_instances,
         "spark.driver.cores": spark_driver_cores,
         "spark.driver.maxResultSize": spark_max_result_size,
-        "spark.kubernetes.authenticate.driver.serviceAccountName": os.environ.get(
-            "SPARK_SERVICE_ACCOUNT",
-            "spark",
-        ),
-        "spark.kubernetes.authenticate.executor.serviceAccountName": os.environ.get(
-            "SPARK_SERVICE_ACCOUNT",
-            "spark",
-        ),
+        "spark.kubernetes.authenticate.driver.serviceAccountName": spark_service_account,
+        "spark.kubernetes.authenticate.executor.serviceAccountName": spark_service_account,
         "spark.kubernetes.driver.limit.cores": spark_driver_cores,
         "spark.kubernetes.executor.limit.cores": spark_executor_cores,
         "spark.task.maxFailures": spark_task_max_failures,
@@ -405,14 +402,6 @@ def build_spark_conf(
         conf["spark.hadoop.fs.s3a.secret.key"] = AWS_SECRET_ACCESS_KEY
         if AWS_SESSION_TOKEN:
             conf["spark.hadoop.fs.s3a.session.token"] = AWS_SESSION_TOKEN
-
-    if ICEBERG_REST_AUTH_TYPE and ICEBERG_REST_AUTH_TYPE != "none":
-        conf[f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.type"] = ICEBERG_REST_AUTH_TYPE
-
-    if os.environ.get("ICEBERG_REST_USER", "").strip():
-        conf[f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.basic.username"] = os.environ["ICEBERG_REST_USER"].strip()
-    if os.environ.get("ICEBERG_REST_PASSWORD", "").strip():
-        conf[f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.basic.password"] = os.environ["ICEBERG_REST_PASSWORD"].strip()
 
     for key, value in aws_env.items():
         if value:
@@ -474,39 +463,41 @@ def probe_iceberg_rest_endpoint() -> None:
 
 
 def validate_iceberg_catalog(spark: SparkSession) -> None:
+    impl_key = f"spark.sql.catalog.{CATALOG_NAME}"
     type_key = f"spark.sql.catalog.{CATALOG_NAME}.type"
     uri_key = f"spark.sql.catalog.{CATALOG_NAME}.uri"
+    warehouse_key = f"spark.sql.catalog.{CATALOG_NAME}.warehouse"
     auth_key = f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.type"
 
+    catalog_impl = spark.conf.get(impl_key, "").strip()
     catalog_type = spark.conf.get(type_key, "").strip().lower()
     catalog_uri = spark.conf.get(uri_key, "").strip().rstrip("/")
+    catalog_warehouse = spark.conf.get(warehouse_key, "").strip().rstrip("/") + "/"
     auth_type = spark.conf.get(auth_key, ICEBERG_REST_AUTH_TYPE).strip().lower()
 
+    if catalog_impl != "org.apache.iceberg.spark.SparkCatalog":
+        raise RuntimeError(
+            f"Iceberg catalog misconfigured: expected {impl_key}=org.apache.iceberg.spark.SparkCatalog, got {catalog_impl!r}"
+        )
     if catalog_type != "rest":
         raise RuntimeError(
             f"Iceberg catalog misconfigured: expected {type_key}=rest, got {catalog_type!r}"
         )
-    if not catalog_uri:
-        raise RuntimeError(f"Iceberg catalog misconfigured: missing {uri_key}")
-    if catalog_uri.startswith("s3://"):
+    if catalog_uri != ICEBERG_REST_URI:
         raise RuntimeError(
-            f"Iceberg catalog misconfigured: {uri_key} points at a warehouse path, not the REST endpoint: {catalog_uri!r}"
+            f"Iceberg catalog misconfigured: expected {uri_key}={ICEBERG_REST_URI!r}, got {catalog_uri!r}"
         )
     if not catalog_uri.startswith(("http://", "https://")):
         raise RuntimeError(
             f"Iceberg catalog misconfigured: {uri_key} must be an http(s) REST endpoint, got {catalog_uri!r}"
         )
+    if catalog_warehouse != ICEBERG_WAREHOUSE:
+        raise RuntimeError(
+            f"Iceberg catalog misconfigured: expected {warehouse_key}={ICEBERG_WAREHOUSE!r}, got {catalog_warehouse!r}"
+        )
     if auth_type != "none":
         raise RuntimeError(
             f"Iceberg catalog misconfigured: expected {auth_key}=none, got {auth_type!r}"
-        )
-
-    spark_warehouse_key = f"spark.sql.catalog.{CATALOG_NAME}.warehouse"
-    spark_warehouse = spark.conf.get(spark_warehouse_key, "").strip()
-    if spark_warehouse and spark_warehouse.rstrip("/") != ICEBERG_WAREHOUSE.rstrip("/"):
-        raise RuntimeError(
-            "Iceberg catalog misconfigured: Spark warehouse does not match the configured warehouse. "
-            f"spark={spark_warehouse!r}, env={ICEBERG_WAREHOUSE!r}"
         )
 
     log_json(
@@ -515,7 +506,7 @@ def validate_iceberg_catalog(spark: SparkSession) -> None:
         type=catalog_type,
         uri=catalog_uri,
         warehouse_env=ICEBERG_WAREHOUSE,
-        warehouse_spark=spark_warehouse or None,
+        warehouse_spark=catalog_warehouse,
         rest_auth_type=auth_type,
     )
 
