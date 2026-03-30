@@ -107,10 +107,10 @@ TAXI_ZONE_LOOKUP_URL = os.environ.get(
 ).strip()
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or None
 
-TASK_IMAGE = os.environ.get("ELT_TASK_IMAGE", "").strip()
-if not TASK_IMAGE:
-    raise RuntimeError("ELT_TASK_IMAGE must be set before importing bronze_ingest.py")
-
+TASK_IMAGE = os.environ.get(
+    "ELT_TASK_IMAGE",
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-30-07-33--15e04f8",
+).strip()
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
     value = int(os.environ.get(name, str(default)))

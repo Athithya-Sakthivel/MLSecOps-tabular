@@ -1,7 +1,7 @@
 # Flyte task image for ELT runtime.
 # Base image: Apache Spark 4.0.2 + Scala 2.13 + Java 21 + Python 3 on Ubuntu
 # The image adds:
-# - minimal Python dependencies used by the tasks
+# - minimal Python dependencies used by the flyte tasks
 # - Iceberg + Hadoop AWS runtime jars
 # - writable cache directories for Hugging Face / datasets
 # FROM apache/spark:4.0.2-scala2.13-java21-python3-ubuntu
