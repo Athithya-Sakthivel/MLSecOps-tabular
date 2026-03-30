@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
-import numpy as np
 import pandas as pd
 from flytekit import task
 from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
-
 from tasks.common import (
     CATEGORICAL_FEATURES,
     FEATURE_COLUMNS,
@@ -26,7 +24,7 @@ def evaluate_model(
     train_artifacts_dir: FlyteDirectory,
     gold_dataset: FlyteFile,
     validation_fraction: float = 0.15,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Evaluate the fitted LightGBM booster on the exact chronological validation split."""
 
     from lightgbm import Booster
@@ -49,11 +47,11 @@ def evaluate_model(
     y_true = valid_df[LABEL_COLUMN].to_numpy(dtype="float64")
     y_pred = booster.predict(features, num_iteration=booster.best_iteration or None)
 
-    metrics: Dict[str, Any] = compute_regression_metrics(y_true, y_pred)
+    metrics: dict[str, Any] = compute_regression_metrics(y_true, y_pred)
     metrics.update(
         {
-            "validation_rows": int(len(valid_df)),
-            "train_rows": int(len(split.train_df)),
+            "validation_rows": len(valid_df),
+            "train_rows": len(split.train_df),
             "manifest_best_iteration": int(manifest.get("boost_rounds", 0)),
         }
     )

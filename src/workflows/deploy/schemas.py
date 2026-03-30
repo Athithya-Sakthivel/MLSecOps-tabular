@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
@@ -49,16 +50,12 @@ def build_feature_matrix(
     for row_idx, row in enumerate(instances):
         missing = [name for name in feature_order if name not in row]
         if missing:
-            raise ValueError(
-                f"Missing required features at row {row_idx}: {', '.join(missing)}"
-            )
+            raise ValueError(f"Missing required features at row {row_idx}: {', '.join(missing)}")
 
         if not allow_extra_features:
             extra = [name for name in row.keys() if name not in feature_set]
             if extra:
-                raise ValueError(
-                    f"Unexpected features at row {row_idx}: {', '.join(sorted(extra))}"
-                )
+                raise ValueError(f"Unexpected features at row {row_idx}: {', '.join(sorted(extra))}")
 
         values: list[float] = []
         for name in feature_order:
@@ -68,9 +65,7 @@ def build_feature_matrix(
             try:
                 numeric = float(value)
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Feature '{name}' must be numeric at row {row_idx}"
-                ) from exc
+                raise ValueError(f"Feature '{name}' must be numeric at row {row_idx}") from exc
             if not math.isfinite(numeric):
                 raise ValueError(f"Feature '{name}' must be finite at row {row_idx}")
             values.append(numeric)
@@ -110,9 +105,7 @@ def split_model_outputs(
                 for row in normalized:
                     row.append((name, scalar))
                 continue
-            raise ValueError(
-                f"Output '{name}' has batch dimension {arr.shape[0]}, expected {row_count}"
-            )
+            raise ValueError(f"Output '{name}' has batch dimension {arr.shape[0]}, expected {row_count}")
 
         for idx in range(row_count):
             value = arr[idx]

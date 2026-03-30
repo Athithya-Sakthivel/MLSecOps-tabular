@@ -4,7 +4,6 @@ from pathlib import Path
 
 from flytekit import task
 from flytekit.types.file import FlyteFile
-
 from tasks.common import (
     DEFAULT_VALIDATION_FRACTION,
     REQUIRED_COLUMNS,
@@ -54,9 +53,9 @@ def validate_dataset(
     write_json(
         out_path.with_suffix(".validation_report.json"),
         {
-            "rows": int(len(validated_df)),
-            "train_rows": int(len(split.train_df)),
-            "valid_rows": int(len(split.valid_df)),
+            "rows": len(validated_df),
+            "train_rows": len(split.train_df),
+            "valid_rows": len(split.valid_df),
             "cutoff_ts": split.cutoff_ts,
         },
     )

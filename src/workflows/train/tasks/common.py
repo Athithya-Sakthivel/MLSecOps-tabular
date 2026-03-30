@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ TIMESTAMP_COLUMN = "trip_start_ts"
 IDENTIFIER_COLUMNS = ["trip_id"]
 
 # Frozen feature contract for the ETA / duration regression use case.
-FEATURE_COLUMNS: List[str] = [
+FEATURE_COLUMNS: list[str] = [
     "pickup_hour",
     "pickup_dow",
     "pickup_month",
@@ -28,17 +29,17 @@ FEATURE_COLUMNS: List[str] = [
 ]
 
 # Columns that are encoded as integer categories in Gold.
-CATEGORICAL_FEATURES: List[str] = [
+CATEGORICAL_FEATURES: list[str] = [
     "pickup_borough_id",
     "pickup_zone_id",
     "pickup_service_zone_id",
     "route_pair_id",
 ]
 
-NUMERIC_FEATURES: List[str] = [c for c in FEATURE_COLUMNS if c not in CATEGORICAL_FEATURES]
+NUMERIC_FEATURES: list[str] = [c for c in FEATURE_COLUMNS if c not in CATEGORICAL_FEATURES]
 
 # Required for training. Extra columns in Gold are ignored.
-REQUIRED_COLUMNS: List[str] = [
+REQUIRED_COLUMNS: list[str] = [
     *IDENTIFIER_COLUMNS,
     TIMESTAMP_COLUMN,
     *FEATURE_COLUMNS,
@@ -82,12 +83,10 @@ class DatasetArtifacts:
     parity_sample_path: str
 
 
-
 def ensure_directory(path: str | Path) -> Path:
     out = Path(path)
     out.mkdir(parents=True, exist_ok=True)
     return out
-
 
 
 def write_json(path: str | Path, payload: Any) -> str:
@@ -99,11 +98,9 @@ def write_json(path: str | Path, payload: Any) -> str:
     return str(path)
 
 
-
 def read_json(path: str | Path) -> Any:
     with Path(path).open("r", encoding="utf-8") as f:
         return json.load(f)
-
 
 
 def _json_default(value: Any) -> Any:
@@ -120,18 +117,15 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-
-def load_gold_frame(dataset_uri: str, columns: List[str] | None = None) -> pd.DataFrame:
+def load_gold_frame(dataset_uri: str, columns: list[str] | None = None) -> pd.DataFrame:
     # pandas delegates to pyarrow/fsspec/s3fs for local and remote parquet URIs.
     return pd.read_parquet(dataset_uri, columns=columns, engine="pyarrow")
-
 
 
 def validate_required_columns(df: pd.DataFrame, required_columns: Iterable[str] = REQUIRED_COLUMNS) -> None:
     missing = [c for c in required_columns if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
-
 
 
 def coerce_contract_dtypes(df: pd.DataFrame) -> pd.DataFrame:
@@ -141,7 +135,7 @@ def coerce_contract_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     for col in IDENTIFIER_COLUMNS + CATEGORICAL_FEATURES:
         out[col] = pd.to_numeric(out[col], errors="raise").astype("int64")
 
-    for col in NUMERIC_FEATURES + [LABEL_COLUMN]:
+    for col in [*NUMERIC_FEATURES, LABEL_COLUMN]:
         out[col] = pd.to_numeric(out[col], errors="raise").astype("float64")
 
     # Time encodings should remain integer-like for model stability.
@@ -151,13 +145,11 @@ def coerce_contract_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-
 def assert_no_leakage_columns(df: pd.DataFrame) -> None:
     forbidden_markers = ("post_trip", "actual_", "target_")
     leakage_like = [c for c in df.columns if any(marker in c for marker in forbidden_markers)]
     if leakage_like:
         raise ValueError(f"Potential leakage columns present in Gold: {leakage_like}")
-
 
 
 def validate_value_contracts(df: pd.DataFrame) -> None:
@@ -170,7 +162,6 @@ def validate_value_contracts(df: pd.DataFrame) -> None:
 
     if df[TIMESTAMP_COLUMN].isna().any():
         raise ValueError(f"{TIMESTAMP_COLUMN} contains nulls after parsing")
-
 
 
 def split_by_time(df: pd.DataFrame, validation_fraction: float) -> SplitResult:
@@ -187,10 +178,8 @@ def split_by_time(df: pd.DataFrame, validation_fraction: float) -> SplitResult:
     return SplitResult(train_df=train_df, valid_df=valid_df, cutoff_ts=cutoff_ts)
 
 
-
 def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df[FEATURE_COLUMNS].copy()
-
 
 
 def build_training_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -198,8 +187,7 @@ def build_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df[cols].copy()
 
 
-
-def make_feature_spec() -> Dict[str, Any]:
+def make_feature_spec() -> dict[str, Any]:
     return {
         "label_column": LABEL_COLUMN,
         "timestamp_column": TIMESTAMP_COLUMN,
@@ -217,15 +205,13 @@ def make_feature_spec() -> Dict[str, Any]:
 build_feature_spec = make_feature_spec
 
 
-
-def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
     mae = mean_absolute_error(y_true, y_pred)
     rmse = mean_squared_error(y_true, y_pred, squared=False)
     r2 = r2_score(y_true, y_pred)
     return {"mae": float(mae), "rmse": float(rmse), "r2": float(r2)}
-
 
 
 def sample_frame(df: pd.DataFrame, max_rows: int, seed: int) -> pd.DataFrame:

@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
 try:
     from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 except ImportError:  # pragma: no cover
     from opentelemetry.exporter.otlp.proto.grpc.log_exporter import OTLPLogExporter  # type: ignore
+from config import Settings
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler, set_logger_provider
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
@@ -20,8 +22,6 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
-
-from config import Settings
 
 
 def _grpc_endpoint(endpoint: str) -> str:
@@ -120,16 +120,14 @@ def initialize_telemetry(settings: Settings) -> TelemetryHandle:
     root_logger.setLevel(settings.log_level)
     if not any(getattr(handler, "_otel_handler", False) for handler in root_logger.handlers):
         otel_handler = LoggingHandler(level=root_logger.level, logger_provider=logger_provider)
-        setattr(otel_handler, "_otel_handler", True)
+        otel_handler._otel_handler = True
         root_logger.addHandler(otel_handler)
 
     _HANDLE = TelemetryHandle(
         tracer_provider=tracer_provider,
         meter_provider=meter_provider,
         logger_provider=logger_provider,
-        root_handler=next(
-            handler for handler in root_logger.handlers if getattr(handler, "_otel_handler", False)
-        ),
+        root_handler=next(handler for handler in root_logger.handlers if getattr(handler, "_otel_handler", False)),
     )
     _INITIALIZED = True
     atexit.register(_HANDLE.shutdown)

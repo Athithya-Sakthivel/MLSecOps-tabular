@@ -4,7 +4,6 @@ from pathlib import Path
 
 from flytekit import task
 from flytekit.types.file import FlyteFile
-
 from tasks.common import (
     REQUIRED_COLUMNS,
     TIMESTAMP_COLUMN,
@@ -45,7 +44,7 @@ def load_gold(dataset_uri: str, output_path: str = "/tmp/gold_canonical.parquet"
             "dataset_uri": dataset_uri,
             "columns": REQUIRED_COLUMNS,
             "timestamp_column": TIMESTAMP_COLUMN,
-            "rows": int(len(df)),
+            "rows": len(df),
         },
     )
 

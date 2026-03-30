@@ -12,7 +12,6 @@ from typing import Any
 
 import fsspec
 import onnxruntime as ort
-
 from config import Settings
 
 
@@ -154,16 +153,13 @@ def load_model_bundle(settings: Settings) -> tuple[Path, ModelSchema, ModelMetad
     if not src_fs.exists(model_src):
         raise FileNotFoundError(f"Model artifact not found: {settings.model_uri}")
     if not src_fs.exists(schema_src):
-        raise FileNotFoundError(
-            f"schema.json is required next to the model artifact: {schema_src}"
-        )
+        raise FileNotFoundError(f"schema.json is required next to the model artifact: {schema_src}")
 
     model_sha256 = _copy_with_hash(src_fs, model_src, model_path)
     if settings.model_sha256 and model_sha256.lower() != settings.model_sha256.lower():
         model_path.unlink(missing_ok=True)
         raise RuntimeError(
-            f"MODEL_SHA256 mismatch for {settings.model_uri}: "
-            f"expected {settings.model_sha256}, got {model_sha256}"
+            f"MODEL_SHA256 mismatch for {settings.model_uri}: expected {settings.model_sha256}, got {model_sha256}"
         )
 
     schema_text = _read_text(src_fs, schema_src)
@@ -212,7 +208,7 @@ def build_onnx_session(model_path: Path, settings: Settings) -> ort.InferenceSes
 
     intra = settings.ort_intra_op_num_threads
     if intra <= 0:
-        intra = max(1, int(math.ceil(settings.replica_num_cpus)))
+        intra = max(1, math.ceil(settings.replica_num_cpus))
 
     inter = settings.ort_inter_op_num_threads
     if inter <= 0:

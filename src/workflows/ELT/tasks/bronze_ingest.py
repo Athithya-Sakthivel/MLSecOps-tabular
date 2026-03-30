@@ -9,9 +9,10 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from flytekit import Resources, current_context, task
 from flytekitplugins.spark import Spark
@@ -49,17 +50,17 @@ ICEBERG_WAREHOUSE = (
 )
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
-ELT_PROFILE = os.environ.get(
-    "ELT_PROFILE",
-    "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
-).strip().lower()
+ELT_PROFILE = (
+    os.environ.get(
+        "ELT_PROFILE",
+        "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
+    )
+    .strip()
+    .lower()
+)
 IS_PROD = ELT_PROFILE == "prod"
 
-AWS_DEFAULT_REGION = (
-    os.environ.get("AWS_DEFAULT_REGION")
-    or os.environ.get("AWS_REGION")
-    or "ap-south-1"
-).strip()
+AWS_DEFAULT_REGION = (os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION") or "ap-south-1").strip()
 AWS_REGION = (os.environ.get("AWS_REGION") or AWS_DEFAULT_REGION).strip()
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
@@ -238,9 +239,7 @@ def normalize_record(row: dict) -> dict:
     for key, value in row.items():
         normalized_key = normalize_column_name(str(key))
         if normalized_key in out:
-            raise ValueError(
-                f"column collision after normalization: {key!r} -> {normalized_key!r}"
-            )
+            raise ValueError(f"column collision after normalization: {key!r} -> {normalized_key!r}")
         out[normalized_key] = value
     return out
 
@@ -258,9 +257,7 @@ def qualify_table_id(table_id: str) -> str:
         return table_id
     if len(parts) == 2:
         return f"{CATALOG_NAME}.{table_id}"
-    raise ValueError(
-        f"expected table id in the form catalog.namespace.table or namespace.table, got {table_id!r}"
-    )
+    raise ValueError(f"expected table id in the form catalog.namespace.table or namespace.table, got {table_id!r}")
 
 
 def parse_table_id(table_id: str) -> tuple[str, str, str]:
@@ -276,9 +273,7 @@ def ensure_namespace(spark: SparkSession, catalog_name: str, namespace: str) -> 
 def table_exists(spark: SparkSession, table_id: str) -> bool:
     catalog_name, namespace, table_name = parse_table_id(table_id)
     table_name = table_name.replace("'", "''")
-    rows = spark.sql(
-        f"SHOW TABLES IN {catalog_name}.{namespace} LIKE '{table_name}'"
-    ).limit(1).collect()
+    rows = spark.sql(f"SHOW TABLES IN {catalog_name}.{namespace} LIKE '{table_name}'").limit(1).collect()
     return bool(rows)
 
 
@@ -439,9 +434,7 @@ def get_spark_session() -> SparkSession:
     if spark is None:
         spark = SparkSession.getActiveSession()
     if spark is None:
-        raise RuntimeError(
-            "Spark session not available. This task must run through Flyte's Spark execution path."
-        )
+        raise RuntimeError("Spark session not available. This task must run through Flyte's Spark execution path.")
     return spark
 
 
@@ -480,9 +473,7 @@ def validate_iceberg_catalog(spark: SparkSession) -> None:
             f"Iceberg catalog misconfigured: expected {impl_key}=org.apache.iceberg.spark.SparkCatalog, got {catalog_impl!r}"
         )
     if catalog_type != "rest":
-        raise RuntimeError(
-            f"Iceberg catalog misconfigured: expected {type_key}=rest, got {catalog_type!r}"
-        )
+        raise RuntimeError(f"Iceberg catalog misconfigured: expected {type_key}=rest, got {catalog_type!r}")
     if catalog_uri != ICEBERG_REST_URI:
         raise RuntimeError(
             f"Iceberg catalog misconfigured: expected {uri_key}={ICEBERG_REST_URI!r}, got {catalog_uri!r}"
@@ -496,9 +487,7 @@ def validate_iceberg_catalog(spark: SparkSession) -> None:
             f"Iceberg catalog misconfigured: expected {warehouse_key}={ICEBERG_WAREHOUSE!r}, got {catalog_warehouse!r}"
         )
     if auth_type != "none":
-        raise RuntimeError(
-            f"Iceberg catalog misconfigured: expected {auth_key}=none, got {auth_type!r}"
-        )
+        raise RuntimeError(f"Iceberg catalog misconfigured: expected {auth_key}=none, got {auth_type!r}")
 
     log_json(
         msg="iceberg_catalog_config",
@@ -552,9 +541,13 @@ def stream_to_dataframe(
         total_rows += 1
         if len(batch) >= chunk_size:
             batch_df, schema = flush_batch(batch, schema)
-            accumulated_df = batch_df if accumulated_df is None else accumulated_df.unionByName(
-                batch_df,
-                allowMissingColumns=True,
+            accumulated_df = (
+                batch_df
+                if accumulated_df is None
+                else accumulated_df.unionByName(
+                    batch_df,
+                    allowMissingColumns=True,
+                )
             )
             log_json(
                 msg="materialized_batch",
@@ -566,9 +559,13 @@ def stream_to_dataframe(
 
     if batch:
         batch_df, schema = flush_batch(batch, schema)
-        accumulated_df = batch_df if accumulated_df is None else accumulated_df.unionByName(
-            batch_df,
-            allowMissingColumns=True,
+        accumulated_df = (
+            batch_df
+            if accumulated_df is None
+            else accumulated_df.unionByName(
+                batch_df,
+                allowMissingColumns=True,
+            )
         )
         log_json(
             msg="materialized_final_batch",
@@ -768,11 +765,7 @@ def _spark_tuning_summary() -> dict[str, Any]:
 def bronze_ingest() -> BronzeIngestResult:
     run_id = os.environ.get("RUN_ID") or os.environ.get("FLYTE_INTERNAL_EXECUTION_ID") or uuid.uuid4().hex
 
-    trips_source_ref = (
-        f"{TRIPS_DATASET_ID}@{TRIPS_DATASET_REVISION}"
-        if TRIPS_DATASET_REVISION
-        else TRIPS_DATASET_ID
-    )
+    trips_source_ref = f"{TRIPS_DATASET_ID}@{TRIPS_DATASET_REVISION}" if TRIPS_DATASET_REVISION else TRIPS_DATASET_ID
     taxi_zone_source_ref = TAXI_ZONE_LOOKUP_URL
 
     log_json(

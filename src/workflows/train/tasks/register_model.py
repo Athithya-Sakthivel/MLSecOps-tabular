@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from flytekit import task
 from flytekit.types.directory import FlyteDirectory
-
 from tasks.common import DEFAULT_MLFLOW_EXPERIMENT, read_json
 
 
@@ -13,7 +12,7 @@ from tasks.common import DEFAULT_MLFLOW_EXPERIMENT, read_json
 def register_model(
     train_artifacts_dir: FlyteDirectory,
     onnx_artifacts_dir: FlyteDirectory,
-    evaluation_metrics: Dict[str, Any],
+    evaluation_metrics: dict[str, Any],
     mlflow_experiment_name: str = DEFAULT_MLFLOW_EXPERIMENT,
 ) -> None:
     """Log the model and all artifacts to MLflow as the final registry step."""
@@ -44,8 +43,12 @@ def register_model(
         mlflow.log_params({f"flaml__{k}": v for k, v in best_config.items()})
         mlflow.log_params({f"manifest__{k}": v for k, v in manifest.items() if isinstance(v, (str, int, float, bool))})
         mlflow.log_metrics({f"train__{k}": float(v) for k, v in train_metrics.items() if isinstance(v, (int, float))})
-        mlflow.log_metrics({f"eval__{k}": float(v) for k, v in evaluation_metrics.items() if isinstance(v, (int, float))})
-        mlflow.log_metrics({f"onnx_parity__{k}": float(v) for k, v in onnx_parity.items() if isinstance(v, (int, float))})
+        mlflow.log_metrics(
+            {f"eval__{k}": float(v) for k, v in evaluation_metrics.items() if isinstance(v, (int, float))}
+        )
+        mlflow.log_metrics(
+            {f"onnx_parity__{k}": float(v) for k, v in onnx_parity.items() if isinstance(v, (int, float))}
+        )
 
         mlflow.log_artifact(str(train_dir / "model.txt"), artifact_path="model")
         mlflow.log_artifact(str(train_dir / "manifest.json"), artifact_path="model")

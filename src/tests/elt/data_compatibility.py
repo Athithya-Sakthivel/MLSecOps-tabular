@@ -4,10 +4,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice, tee
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -160,7 +160,7 @@ def load_parquet_copy(src: Path, dst: Path) -> int:
     return table.num_rows
 
 
-def load_warehouse(raw_dir: Path, warehouse_dir: Path) -> Tuple[Path, Path]:
+def load_warehouse(raw_dir: Path, warehouse_dir: Path) -> tuple[Path, Path]:
     trips_src = raw_dir / "trips.parquet"
     zones_src = raw_dir / "taxi_zone_lookup.parquet"
 
@@ -196,9 +196,7 @@ def validate_joinability(trips_path: Path, zones_path: Path) -> None:
     if missing_zone_cols:
         raise ValueError(f"Zone lookup table is missing columns required for join: {sorted(missing_zone_cols)}")
 
-    LOGGER.info(
-        "Join keys verified: trips(PULocationID, DOLocationID) -> zones(LocationID)"
-    )
+    LOGGER.info("Join keys verified: trips(PULocationID, DOLocationID) -> zones(LocationID)")
 
 
 def run_etl(raw_dir: Path, warehouse_dir: Path, max_rows: int, token: str | None) -> None:

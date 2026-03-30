@@ -18,12 +18,11 @@ import copy
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 MANIFEST_DIR = Path(os.environ.get("MANIFEST_DIR", "src/manifests/flyte"))
@@ -104,7 +103,7 @@ SERVICE_ANNOTATION_VALUE = ""
 
 
 def ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def log(msg: str) -> None:
@@ -350,7 +349,7 @@ def ensure_database(db_name: str) -> None:
                 "--",
                 "sh",
                 "-lc",
-                f"psql -U postgres -v ON_ERROR_STOP=1 -c \"CREATE DATABASE {db_name} OWNER \\\"{APP_DB_USER}\\\";\"",
+                f'psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE {db_name} OWNER \\"{APP_DB_USER}\\";"',
             ],
             check=False,
         )
@@ -367,7 +366,7 @@ def ensure_database(db_name: str) -> None:
             "--",
             "sh",
             "-lc",
-            f"psql -U postgres -v ON_ERROR_STOP=1 -c \"ALTER DATABASE {db_name} OWNER TO \\\"{APP_DB_USER}\\\";\"",
+            f'psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE {db_name} OWNER TO \\"{APP_DB_USER}\\";"',
         ],
         check=False,
     )
@@ -381,7 +380,7 @@ def ensure_database(db_name: str) -> None:
             "--",
             "sh",
             "-lc",
-            f"psql -U postgres -d \"{db_name}\" -v ON_ERROR_STOP=1 -c \"ALTER SCHEMA public OWNER TO \\\"{APP_DB_USER}\\\";\"",
+            f'psql -U postgres -d "{db_name}" -v ON_ERROR_STOP=1 -c "ALTER SCHEMA public OWNER TO \\"{APP_DB_USER}\\";"',
         ],
         check=False,
     )
@@ -521,7 +520,9 @@ def build_values() -> dict[str, Any]:
 
     service_account = {
         "create": True,
-        "annotations": {SERVICE_ANNOTATION_KEY: SERVICE_ANNOTATION_VALUE} if SERVICE_ANNOTATION_KEY and SERVICE_ANNOTATION_VALUE else {},
+        "annotations": {SERVICE_ANNOTATION_KEY: SERVICE_ANNOTATION_VALUE}
+        if SERVICE_ANNOTATION_KEY and SERVICE_ANNOTATION_VALUE
+        else {},
     }
 
     if provider == "aws":
@@ -678,11 +679,7 @@ def build_values() -> dict[str, Any]:
                     "signedUrls": {"durationMinutes": 3},
                 }
             },
-            "resource_manager": {
-                "propeller": {
-                    "resourcemanager": {"type": "noop"}
-                }
-            },
+            "resource_manager": {"propeller": {"resourcemanager": {"type": "noop"}}},
             "task_logs": {
                 "plugins": {
                     "logs": {
@@ -704,7 +701,9 @@ def build_values() -> dict[str, Any]:
                     "spark": {
                         "spark-config-default": (
                             [
-                                {"spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"},
+                                {
+                                    "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+                                },
                                 {"spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version": "2"},
                                 {"spark.kubernetes.allocation.batch.size": "50"},
                                 {"spark.hadoop.fs.s3a.acl.default": "BucketOwnerFullControl"},
@@ -829,7 +828,7 @@ def wait_for_rollouts() -> None:
                 "get",
                 "deploy",
                 "-o",
-                "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+                'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
             ]
         )
     except subprocess.CalledProcessError:
@@ -837,7 +836,10 @@ def wait_for_rollouts() -> None:
 
     for dep in [line.strip() for line in deploys.splitlines() if line.strip()]:
         log(f"waiting for deployment {dep}")
-        run(["kubectl", "-n", TARGET_NS, "rollout", "status", f"deployment/{dep}", f"--timeout={ROLLOUT_TIMEOUT}"], check=True)
+        run(
+            ["kubectl", "-n", TARGET_NS, "rollout", "status", f"deployment/{dep}", f"--timeout={ROLLOUT_TIMEOUT}"],
+            check=True,
+        )
 
 
 def main() -> None:
@@ -989,7 +991,7 @@ def cli() -> int:
         except Exception:
             pass
         return exc.returncode
-    except SystemExit as exc:
+    except SystemExit:
         raise
     except Exception as exc:
         print(f"[{ts()}] [flyte][FATAL] {exc}", file=sys.stderr)

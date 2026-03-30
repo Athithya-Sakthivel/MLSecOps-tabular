@@ -4,8 +4,8 @@ import logging
 import math
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from flytekit import Resources, task
 from flytekitplugins.spark import Spark
@@ -40,10 +40,14 @@ LOG.handlers[:] = [_handler]
 LOG.propagate = False
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
-ELT_PROFILE = os.environ.get(
-    "ELT_PROFILE",
-    "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
-).strip().lower()
+ELT_PROFILE = (
+    os.environ.get(
+        "ELT_PROFILE",
+        "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
+    )
+    .strip()
+    .lower()
+)
 
 if ELT_PROFILE == "prod":
     TASK_LIMITS = Resources(cpu="1000m", mem="1024Mi")
@@ -146,15 +150,12 @@ def ensure_zone_schema(df: DataFrame) -> DataFrame:
     required = ("location_id", "borough", "zone", "service_zone")
     require_columns(df, required, "bronze taxi zone table")
 
-    return (
-        df.select(
-            F.col("location_id").cast("long").alias("location_id"),
-            F.col("borough").cast("string").alias("borough"),
-            F.col("zone").cast("string").alias("zone"),
-            F.col("service_zone").cast("string").alias("service_zone"),
-        )
-        .dropDuplicates(["location_id"])
-    )
+    return df.select(
+        F.col("location_id").cast("long").alias("location_id"),
+        F.col("borough").cast("string").alias("borough"),
+        F.col("zone").cast("string").alias("zone"),
+        F.col("service_zone").cast("string").alias("service_zone"),
+    ).dropDuplicates(["location_id"])
 
 
 def stable_trip_id_expr() -> F.Column:
@@ -273,9 +274,7 @@ def build_canonical_frame(trips_df: DataFrame, zones_df: DataFrame, run_id: str)
         .withColumn("pickup_month", F.month(F.col("pickup_ts")).cast("int"))
         .withColumn(
             "pickup_is_weekend",
-            F.when(F.dayofweek(F.col("pickup_ts")).isin(1, 7), F.lit(1))
-            .otherwise(F.lit(0))
-            .cast("int"),
+            F.when(F.dayofweek(F.col("pickup_ts")).isin(1, 7), F.lit(1)).otherwise(F.lit(0)).cast("int"),
         )
         .withColumn(
             "trip_duration_seconds",

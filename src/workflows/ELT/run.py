@@ -14,8 +14,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn, Sequence
+from typing import NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
@@ -30,9 +31,13 @@ TASK_NAMESPACE = os.environ.get("TASK_NAMESPACE", f"{REMOTE_PROJECT}-{REMOTE_DOM
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
 ELT_PROFILE = (
-    os.environ.get("ELT_PROFILE")
-    or ("dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod")
-).strip().lower()
+    (
+        os.environ.get("ELT_PROFILE")
+        or ("dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod")
+    )
+    .strip()
+    .lower()
+)
 
 SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark")
 ELT_TASK_IMAGE = os.environ.get(
@@ -347,13 +352,13 @@ spec:
 def bootstrap_manifest_quota_line() -> str:
     q = _quota_values()
     return (
-        f'requests.cpu={q["requests_cpu"]}, '
-        f'requests.memory={q["requests_memory"]}, '
-        f'limits.cpu={q["limits_cpu"]}, '
-        f'limits.memory={q["limits_memory"]}, '
-        f'pods={q["pods"]}, '
-        f'persistentvolumeclaims={q["persistentvolumeclaims"]}, '
-        f'services={q["services"]}'
+        f"requests.cpu={q['requests_cpu']}, "
+        f"requests.memory={q['requests_memory']}, "
+        f"limits.cpu={q['limits_cpu']}, "
+        f"limits.memory={q['limits_memory']}, "
+        f"pods={q['pods']}, "
+        f"persistentvolumeclaims={q['persistentvolumeclaims']}, "
+        f"services={q['services']}"
     )
 
 
@@ -430,10 +435,7 @@ def ensure_namespace_bootstrap_ready() -> None:
         missing.append("get pods/log")
 
     if missing:
-        fatal(
-            "service account lacks required Spark permissions: "
-            + ", ".join(missing)
-        )
+        fatal("service account lacks required Spark permissions: " + ", ".join(missing))
 
     log(f"Bootstrap verified for {TASK_NAMESPACE}")
 
@@ -502,10 +504,7 @@ def build_register_command(registration_version: str) -> list[str]:
     elif supports_fast:
         cmd.append("--fast=false")
     else:
-        fatal(
-            "installed pyflyte register does not advertise --copy or --fast; "
-            "cannot safely disable fast registration"
-        )
+        fatal("installed pyflyte register does not advertise --copy or --fast; cannot safely disable fast registration")
 
     if PYFLYTE_REGISTER_EXTRA_ARGS:
         cmd.extend(shlex.split(PYFLYTE_REGISTER_EXTRA_ARGS))
@@ -563,9 +562,7 @@ def register_entities() -> str:
 
     register_env = os.environ.copy()
     existing_pythonpath = register_env.get("PYTHONPATH", "")
-    register_env["PYTHONPATH"] = str(SRC_ROOT) + (
-        os.pathsep + existing_pythonpath if existing_pythonpath else ""
-    )
+    register_env["PYTHONPATH"] = str(SRC_ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
 
     cmd = build_register_command(registration_version)
     run_cmd(cmd, cwd=SRC_ROOT, env=register_env)
@@ -634,7 +631,9 @@ def execute_launch_plan(*, latest: bool | None = None, version: str | None = Non
 
     launch_plan_name = resolve_elt_launchplan_name()
     effective_latest = USE_LATEST if latest is None else latest
-    effective_version = version if version is not None else (None if effective_latest else compute_registration_version())
+    effective_version = (
+        version if version is not None else (None if effective_latest else compute_registration_version())
+    )
 
     if not effective_latest and not effective_version:
         fatal("launch-plan version required when latest is disabled")
@@ -668,7 +667,7 @@ def get_execution_pods(execution_id: str) -> list[str]:
             "-l",
             f"execution-id={execution_id}",
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
         ],
         check=False,
         capture_output=True,
@@ -685,7 +684,7 @@ def get_execution_pods(execution_id: str) -> list[str]:
             "-n",
             TASK_NAMESPACE,
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
         ],
         check=False,
         capture_output=True,
@@ -704,7 +703,7 @@ def get_execution_sparkapps(execution_id: str) -> list[str]:
             "-l",
             f"execution-id={execution_id}",
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
         ],
         check=False,
         capture_output=True,
@@ -721,7 +720,7 @@ def get_execution_sparkapps(execution_id: str) -> list[str]:
             "-n",
             TASK_NAMESPACE,
             "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
         ],
         check=False,
         capture_output=True,

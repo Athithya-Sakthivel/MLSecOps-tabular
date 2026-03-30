@@ -6,7 +6,7 @@ import os
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from flytekit import Resources, task
@@ -41,10 +41,14 @@ LOG.handlers[:] = [_handler]
 LOG.propagate = False
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
-ELT_PROFILE = os.environ.get(
-    "ELT_PROFILE",
-    "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
-).strip().lower()
+ELT_PROFILE = (
+    os.environ.get(
+        "ELT_PROFILE",
+        "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
+    )
+    .strip()
+    .lower()
+)
 
 ICEBERG_EXPIRE_DAYS = int(os.environ.get("ICEBERG_EXPIRE_DAYS", "7"))
 ICEBERG_ORPHAN_DAYS = int(os.environ.get("ICEBERG_ORPHAN_DAYS", "3"))
@@ -89,7 +93,7 @@ def dedupe_preserve_order(items: list[str]) -> list[str]:
 def utc_cutoff_string(days: int) -> str:
     if days < 0:
         raise RuntimeError(f"days must be non-negative, got {days}")
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     return cutoff.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -233,11 +237,7 @@ def maintenance_optimize() -> MaintenanceResult:
     spark.sparkContext.setLogLevel(os.environ.get("SPARK_LOG_LEVEL", "WARN"))
     validate_iceberg_catalog(spark)
 
-    run_id = (
-        os.environ.get("RUN_ID")
-        or os.environ.get("FLYTE_INTERNAL_EXECUTION_ID")
-        or uuid.uuid4().hex
-    )
+    run_id = os.environ.get("RUN_ID") or os.environ.get("FLYTE_INTERNAL_EXECUTION_ID") or uuid.uuid4().hex
     continue_on_error = parse_bool(
         os.environ.get("MAINTENANCE_CONTINUE_ON_ERROR"),
         default=True,
@@ -266,9 +266,7 @@ def maintenance_optimize() -> MaintenanceResult:
         GOLD_TRAINING_TABLE,
     )
 
-    rewrite_where_by_table = parse_table_predicate_map(
-        "ICEBERG_MAINTENANCE_REWRITE_WHERE_BY_TABLE_JSON"
-    )
+    rewrite_where_by_table = parse_table_predicate_map("ICEBERG_MAINTENANCE_REWRITE_WHERE_BY_TABLE_JSON")
     if not rewrite_where_by_table:
         rewrite_where_by_table = default_rewrite_predicates()
 
@@ -384,9 +382,7 @@ def maintenance_optimize() -> MaintenanceResult:
             continue
 
         try:
-            if "as_of_date" in where_clause and not table_has_column(
-                spark, table_id, "as_of_date"
-            ):
+            if "as_of_date" in where_clause and not table_has_column(spark, table_id, "as_of_date"):
                 skipped.append(table_id)
                 table_results.append(
                     table_op_result(

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any, Dict
 
 import pandas as pd
 from flytekit import Resources, task
 from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
 from flytekitplugins.ray import HeadNodeConfig, RayJobConfig, WorkerNodeConfig
-
 from tasks.common import (
     CATEGORICAL_FEATURES,
     DEFAULT_EARLY_STOPPING_ROUNDS,
@@ -28,8 +26,8 @@ from tasks.common import (
     compute_regression_metrics,
     ensure_directory,
     load_gold_frame,
-    split_by_time,
     sample_frame,
+    split_by_time,
     validate_required_columns,
     validate_value_contracts,
     write_json,
@@ -65,9 +63,9 @@ def train_model(
 ) -> FlyteDirectory:
     """Train a LightGBM regression model using FLAML and Ray Train."""
 
+    import ray
     from flaml import AutoML
     from flaml.automl.model import LGBMEstimator
-    import ray
     from ray.train import ScalingConfig
     from ray.train.lightgbm import LightGBMTrainer, RayTrainReportCallback
 
@@ -114,8 +112,8 @@ def train_model(
     if boost_rounds <= 0:
         boost_rounds = num_boost_round
 
-    train_ray = ray.data.from_pandas(train_df[FEATURE_COLUMNS + [LABEL_COLUMN]])
-    valid_ray = ray.data.from_pandas(valid_df[FEATURE_COLUMNS + [LABEL_COLUMN]])
+    train_ray = ray.data.from_pandas(train_df[[*FEATURE_COLUMNS, LABEL_COLUMN]])
+    valid_ray = ray.data.from_pandas(valid_df[[*FEATURE_COLUMNS, LABEL_COLUMN]])
 
     trainer = LightGBMTrainer(
         lambda config: None,
@@ -141,8 +139,8 @@ def train_model(
     metrics.update(
         {
             "best_iteration": int(getattr(booster, "best_iteration", 0) or 0),
-            "train_rows": int(len(train_df)),
-            "valid_rows": int(len(valid_df)),
+            "train_rows": len(train_df),
+            "valid_rows": len(valid_df),
             "flaml_time_budget_seconds": int(flaml_time_budget_seconds),
             "flaml_max_iter": int(flaml_max_iter),
             "cutoff_ts": split.cutoff_ts,

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 from flytekit import workflow
-
 from tasks.common import (
     DEFAULT_EARLY_STOPPING_ROUNDS,
     DEFAULT_FLAML_MAX_ITER,
@@ -31,7 +30,7 @@ def train(
     random_seed: int = DEFAULT_RANDOM_SEED,
     num_boost_round: int = DEFAULT_NUM_BOOST_ROUND,
     early_stopping_rounds: int = DEFAULT_EARLY_STOPPING_ROUNDS,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Production training workflow for the ETA regression model."""
 
     gold_canonical = load_gold(dataset_uri=gold_dataset_uri)

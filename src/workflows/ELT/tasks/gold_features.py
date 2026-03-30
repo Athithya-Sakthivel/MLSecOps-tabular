@@ -5,9 +5,9 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Sequence
+from datetime import UTC, datetime
 
 from flytekit import Resources, task
 from flytekitplugins.spark import Spark
@@ -43,10 +43,14 @@ LOG.handlers[:] = [_handler]
 LOG.propagate = False
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
-ELT_PROFILE = os.environ.get(
-    "ELT_PROFILE",
-    "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
-).strip().lower()
+ELT_PROFILE = (
+    os.environ.get(
+        "ELT_PROFILE",
+        "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
+    )
+    .strip()
+    .lower()
+)
 
 FEATURE_VERSION = os.environ.get("GOLD_FEATURE_VERSION", "trip_eta_lgbm_v1")
 SCHEMA_VERSION = os.environ.get("GOLD_SCHEMA_VERSION", "trip_eta_frozen_matrix_v1")
@@ -158,9 +162,7 @@ def build_borough_map_df(spark) -> DataFrame:
 def distinct_service_zone_values(silver_df: DataFrame) -> list[str]:
     rows = (
         silver_df.select(F.coalesce(F.col("pickup_service_zone"), F.lit("")).alias("service_zone"))
-        .unionByName(
-            silver_df.select(F.coalesce(F.col("dropoff_service_zone"), F.lit("")).alias("service_zone"))
-        )
+        .unionByName(silver_df.select(F.coalesce(F.col("dropoff_service_zone"), F.lit("")).alias("service_zone")))
         .select(F.lower(F.trim(F.col("service_zone"))).alias("service_zone_norm"))
         .where(F.col("service_zone_norm") != "")
         .distinct()
@@ -193,32 +195,21 @@ def route_pair_bucket_expr(pickup_zone_id_col: F.Column, dropoff_zone_id_col: F.
         ),
         256,
     )
-    return (
-        F.pmod(
-            F.conv(F.substring(route_hash, 1, 15), 16, 10).cast("long"),
-            F.lit(ROUTE_PAIR_BUCKETS),
-        ).cast("int")
-        + F.lit(1)
-    )
+    return F.pmod(
+        F.conv(F.substring(route_hash, 1, 15), 16, 10).cast("long"),
+        F.lit(ROUTE_PAIR_BUCKETS),
+    ).cast("int") + F.lit(1)
 
 
 def build_window_features(df: DataFrame) -> DataFrame:
     df = df.withColumn("as_of_ts_sec", F.col("as_of_ts").cast("long"))
 
     w_zone_hour_7d = (
-        Window.partitionBy("pickup_zone_id", "pickup_hour")
-        .orderBy("as_of_ts_sec")
-        .rangeBetween(-7 * 24 * 60 * 60, -1)
+        Window.partitionBy("pickup_zone_id", "pickup_hour").orderBy("as_of_ts_sec").rangeBetween(-7 * 24 * 60 * 60, -1)
     )
-    w_zone_30d = (
-        Window.partitionBy("pickup_zone_id")
-        .orderBy("as_of_ts_sec")
-        .rangeBetween(-30 * 24 * 60 * 60, -1)
-    )
+    w_zone_30d = Window.partitionBy("pickup_zone_id").orderBy("as_of_ts_sec").rangeBetween(-30 * 24 * 60 * 60, -1)
     w_zone_hour_90d = (
-        Window.partitionBy("pickup_zone_id", "pickup_hour")
-        .orderBy("as_of_ts_sec")
-        .rangeBetween(-90 * 24 * 60 * 60, -1)
+        Window.partitionBy("pickup_zone_id", "pickup_hour").orderBy("as_of_ts_sec").rangeBetween(-90 * 24 * 60 * 60, -1)
     )
 
     return (
@@ -242,26 +233,184 @@ def build_window_features(df: DataFrame) -> DataFrame:
 
 def build_feature_spec_rows(service_zone_values: list[str]) -> list[dict]:
     return [
-        {"name": "trip_id", "role": "metadata", "dtype": "string", "nullable": False, "unit": "identifier", "missing_policy": "required"},
-        {"name": "as_of_ts", "role": "metadata", "dtype": "timestamp", "nullable": False, "unit": "timestamp_utc", "missing_policy": "required"},
-        {"name": "as_of_date", "role": "metadata", "dtype": "date", "nullable": False, "unit": "date_utc", "missing_policy": "required"},
-        {"name": "schema_version", "role": "metadata", "dtype": "string", "nullable": False, "unit": "version_tag", "missing_policy": "required"},
-        {"name": "feature_version", "role": "metadata", "dtype": "string", "nullable": False, "unit": "version_tag", "missing_policy": "required"},
-        {"name": "pickup_hour", "role": "feature", "dtype": "int32", "nullable": False, "unit": "hour_0_23", "missing_policy": "required"},
-        {"name": "pickup_dow", "role": "feature", "dtype": "int32", "nullable": False, "unit": "dayofweek_1_sun_7_sat", "missing_policy": "required"},
-        {"name": "pickup_month", "role": "feature", "dtype": "int32", "nullable": False, "unit": "month_1_12", "missing_policy": "required"},
-        {"name": "pickup_is_weekend", "role": "feature", "dtype": "int32", "nullable": False, "unit": "boolean_0_1", "missing_policy": "required"},
-        {"name": "pickup_borough_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "categorical_id", "missing_policy": "0_unknown", "categorical_feature": True, "domain": [0, 1, 2, 3, 4, 5, 6]},
-        {"name": "pickup_zone_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "taxi_zone_location_id", "missing_policy": "0_unknown", "categorical_feature": True, "domain": "positive_location_ids_and_0_unknown"},
-        {"name": "pickup_service_zone_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "categorical_id", "missing_policy": "0_unknown", "categorical_feature": True, "domain": [0] + list(range(1, len(service_zone_values) + 1))},
-        {"name": "dropoff_borough_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "categorical_id", "missing_policy": "0_unknown", "categorical_feature": True, "domain": [0, 1, 2, 3, 4, 5, 6]},
-        {"name": "dropoff_zone_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "taxi_zone_location_id", "missing_policy": "0_unknown", "categorical_feature": True, "domain": "positive_location_ids_and_0_unknown"},
-        {"name": "dropoff_service_zone_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "categorical_id", "missing_policy": "0_unknown", "categorical_feature": True, "domain": [0] + list(range(1, len(service_zone_values) + 1))},
-        {"name": "route_pair_id", "role": "feature", "dtype": "int32", "nullable": False, "unit": "hashed_bucket", "missing_policy": "0_unknown", "categorical_feature": True, "domain": [0] + list(range(1, ROUTE_PAIR_BUCKETS + 1)), "hash_algorithm": "sha256", "hash_salt": ROUTE_PAIR_HASH_SALT, "bucket_count": ROUTE_PAIR_BUCKETS},
-        {"name": "avg_duration_7d_zone_hour", "role": "feature", "dtype": "float64", "nullable": True, "unit": "seconds", "missing_policy": "nan_on_cold_start"},
-        {"name": "avg_fare_30d_zone", "role": "feature", "dtype": "float64", "nullable": True, "unit": "currency_amount", "missing_policy": "nan_on_cold_start"},
-        {"name": "trip_count_90d_zone_hour", "role": "feature", "dtype": "float64", "nullable": False, "unit": "count", "missing_policy": "0_on_cold_start"},
-        {"name": "label_trip_duration_seconds", "role": "label", "dtype": "float64", "nullable": False, "unit": "seconds", "missing_policy": "drop_row_if_null", "target_metric": "mae"},
+        {
+            "name": "trip_id",
+            "role": "metadata",
+            "dtype": "string",
+            "nullable": False,
+            "unit": "identifier",
+            "missing_policy": "required",
+        },
+        {
+            "name": "as_of_ts",
+            "role": "metadata",
+            "dtype": "timestamp",
+            "nullable": False,
+            "unit": "timestamp_utc",
+            "missing_policy": "required",
+        },
+        {
+            "name": "as_of_date",
+            "role": "metadata",
+            "dtype": "date",
+            "nullable": False,
+            "unit": "date_utc",
+            "missing_policy": "required",
+        },
+        {
+            "name": "schema_version",
+            "role": "metadata",
+            "dtype": "string",
+            "nullable": False,
+            "unit": "version_tag",
+            "missing_policy": "required",
+        },
+        {
+            "name": "feature_version",
+            "role": "metadata",
+            "dtype": "string",
+            "nullable": False,
+            "unit": "version_tag",
+            "missing_policy": "required",
+        },
+        {
+            "name": "pickup_hour",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "hour_0_23",
+            "missing_policy": "required",
+        },
+        {
+            "name": "pickup_dow",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "dayofweek_1_sun_7_sat",
+            "missing_policy": "required",
+        },
+        {
+            "name": "pickup_month",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "month_1_12",
+            "missing_policy": "required",
+        },
+        {
+            "name": "pickup_is_weekend",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "boolean_0_1",
+            "missing_policy": "required",
+        },
+        {
+            "name": "pickup_borough_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "categorical_id",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": [0, 1, 2, 3, 4, 5, 6],
+        },
+        {
+            "name": "pickup_zone_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "taxi_zone_location_id",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": "positive_location_ids_and_0_unknown",
+        },
+        {
+            "name": "pickup_service_zone_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "categorical_id",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": [0, *list(range(1, len(service_zone_values) + 1))],
+        },
+        {
+            "name": "dropoff_borough_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "categorical_id",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": [0, 1, 2, 3, 4, 5, 6],
+        },
+        {
+            "name": "dropoff_zone_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "taxi_zone_location_id",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": "positive_location_ids_and_0_unknown",
+        },
+        {
+            "name": "dropoff_service_zone_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "categorical_id",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": [0, *list(range(1, len(service_zone_values) + 1))],
+        },
+        {
+            "name": "route_pair_id",
+            "role": "feature",
+            "dtype": "int32",
+            "nullable": False,
+            "unit": "hashed_bucket",
+            "missing_policy": "0_unknown",
+            "categorical_feature": True,
+            "domain": [0, *list(range(1, ROUTE_PAIR_BUCKETS + 1))],
+            "hash_algorithm": "sha256",
+            "hash_salt": ROUTE_PAIR_HASH_SALT,
+            "bucket_count": ROUTE_PAIR_BUCKETS,
+        },
+        {
+            "name": "avg_duration_7d_zone_hour",
+            "role": "feature",
+            "dtype": "float64",
+            "nullable": True,
+            "unit": "seconds",
+            "missing_policy": "nan_on_cold_start",
+        },
+        {
+            "name": "avg_fare_30d_zone",
+            "role": "feature",
+            "dtype": "float64",
+            "nullable": True,
+            "unit": "currency_amount",
+            "missing_policy": "nan_on_cold_start",
+        },
+        {
+            "name": "trip_count_90d_zone_hour",
+            "role": "feature",
+            "dtype": "float64",
+            "nullable": False,
+            "unit": "count",
+            "missing_policy": "0_on_cold_start",
+        },
+        {
+            "name": "label_trip_duration_seconds",
+            "role": "label",
+            "dtype": "float64",
+            "nullable": False,
+            "unit": "seconds",
+            "missing_policy": "drop_row_if_null",
+            "target_metric": "mae",
+        },
     ]
 
 
@@ -495,9 +644,7 @@ def build_training_matrix(
         .withColumn("pickup_month", F.month(F.col("as_of_ts")).cast("int"))
         .withColumn(
             "pickup_is_weekend",
-            F.when(F.dayofweek(F.col("as_of_ts")).isin(1, 7), F.lit(1))
-            .otherwise(F.lit(0))
-            .cast("int"),
+            F.when(F.dayofweek(F.col("as_of_ts")).isin(1, 7), F.lit(1)).otherwise(F.lit(0)).cast("int"),
         )
         .withColumn("pickup_zone_id", F.coalesce(F.col("pickup_location_id").cast("int"), F.lit(0)).cast("int"))
         .withColumn("dropoff_zone_id", F.coalesce(F.col("dropoff_location_id").cast("int"), F.lit(0)).cast("int"))
@@ -513,7 +660,9 @@ def build_training_matrix(
         F.when(
             (F.col("pickup_zone_id") > 0) & (F.col("dropoff_zone_id") > 0),
             route_pair_bucket_expr(F.col("pickup_zone_id"), F.col("dropoff_zone_id")),
-        ).otherwise(F.lit(0)).cast("int"),
+        )
+        .otherwise(F.lit(0))
+        .cast("int"),
     )
 
     base = build_window_features(base)
@@ -702,7 +851,7 @@ def gold_features(silver: SilverTransformResult) -> GoldFeatureResult:
         "encoding_spec_json": encoding_spec_json,
         "aggregate_spec_json": aggregate_spec_json,
         "label_spec_json": label_spec_json,
-        "created_ts": datetime.now(timezone.utc),
+        "created_ts": datetime.now(UTC),
     }
 
     contract_df = spark.createDataFrame([contract_row])

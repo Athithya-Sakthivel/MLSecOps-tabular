@@ -8,14 +8,12 @@ import pandas as pd
 from flytekit import task
 from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
-
 from tasks.common import (
     CATEGORICAL_FEATURES,
     DEFAULT_ONNX_OPSET,
     FEATURE_COLUMNS,
-    ensure_directory,
     compute_regression_metrics,
-    load_gold_frame,
+    ensure_directory,
     read_json,
     write_json,
 )
@@ -29,8 +27,8 @@ def export_onnx(
 ) -> FlyteDirectory:
     """Convert the trained LightGBM booster to ONNX and verify prediction parity."""
 
-    from lightgbm import Booster
     import onnxruntime as ort
+    from lightgbm import Booster
     from onnxmltools.convert.common.data_types import FloatTensorType
     from onnxmltools.convert.lightgbm import convert as convert_lightgbm
 
@@ -75,7 +73,7 @@ def export_onnx(
     parity_metrics.update(
         {
             "max_abs_error": float(np.max(np.abs(booster_pred - onnx_pred))),
-            "sample_rows": int(len(sample_df)),
+            "sample_rows": len(sample_df),
             "onnx_opset": int(onnx_opset),
         }
     )

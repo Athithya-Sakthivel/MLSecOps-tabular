@@ -5,14 +5,13 @@ import logging
 import time
 from typing import Any
 
+from config import Settings, get_settings
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from model_store import LoadedModel, load_loaded_model
 from opentelemetry import metrics, trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from ray import serve
-
-from config import Settings, get_settings
-from model_store import LoadedModel, load_loaded_model
 from schemas import build_feature_matrix, coerce_instances, split_model_outputs
 from telemetry import initialize_telemetry
 
@@ -162,9 +161,7 @@ class TabularInferenceService:
             payload = await request.json()
             rows = coerce_instances(payload)
             if len(rows) > self.settings.max_instances_per_request:
-                raise ValueError(
-                    f"Too many instances: {len(rows)} > {self.settings.max_instances_per_request}"
-                )
+                raise ValueError(f"Too many instances: {len(rows)} > {self.settings.max_instances_per_request}")
 
             # Submit each row independently so Serve can batch across concurrent requests.
             predictions = await asyncio.gather(*(self._predict_row_batch(row) for row in rows))

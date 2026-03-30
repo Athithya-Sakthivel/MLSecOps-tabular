@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
-import os
-from typing import Tuple
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -34,7 +33,7 @@ def _env_list(name: str, default: list[str], sep: str = ",") -> list[str]:
     return [part.strip() for part in raw.split(sep) if part.strip()]
 
 
-def _env_tuple(name: str, default: Tuple[str, ...], sep: str = ",") -> Tuple[str, ...]:
+def _env_tuple(name: str, default: tuple[str, ...], sep: str = ",") -> tuple[str, ...]:
     return tuple(_env_list(name, list(default), sep=sep))
 
 
@@ -93,15 +92,11 @@ class Settings:
 def get_settings() -> Settings:
     feature_order = _env_list("FEATURE_ORDER", [])
     if not feature_order:
-        raise RuntimeError(
-            "FEATURE_ORDER is required, for example: FEATURE_ORDER=age,income,score"
-        )
+        raise RuntimeError("FEATURE_ORDER is required, for example: FEATURE_ORDER=age,income,score")
 
     model_uri = os.getenv("MODEL_URI", "").strip()
     if not model_uri:
-        raise RuntimeError(
-            "MODEL_URI is required and should point to a bundle root or a model file"
-        )
+        raise RuntimeError("MODEL_URI is required and should point to a bundle root or a model file")
 
     model_output_names = _env_tuple("MODEL_OUTPUT_NAMES", tuple())
     model_input_name = os.getenv("MODEL_INPUT_NAME", "").strip() or None

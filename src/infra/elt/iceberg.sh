@@ -24,7 +24,6 @@ AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
 
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
-SMOKE_TIMEOUT="${SMOKE_TIMEOUT:-180}"
 SPARK_PROBE_IMAGE="${SPARK_PROBE_IMAGE:-${ELT_TASK_IMAGE:-}}"
 
 log() {
@@ -104,30 +103,20 @@ apply_secret() {
   fi
 
   log "creating/updating AWS storage secret ${SECRET_NAME}"
+
+  local args=(
+    kubectl -n "${TARGET_NS}" create secret generic "${SECRET_NAME}"
+    --dry-run=client
+    -o yaml
+    --from-literal=AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
+    --from-literal=AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
+  )
+
   if [[ -n "${AWS_SESSION_TOKEN}" ]]; then
-    kubectl -n "${TARGET_NS}" apply -f - >/dev/null <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${SECRET_NAME}
-type: Opaque
-stringData:
-  AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
-  AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
-  AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN}"
-EOF
-  else
-    kubectl -n "${TARGET_NS}" apply -f - >/dev/null <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${SECRET_NAME}
-type: Opaque
-stringData:
-  AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
-  AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
-EOF
+    args+=(--from-literal=AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN}")
   fi
+
+  "${args[@]}" | kubectl -n "${TARGET_NS}" apply -f - >/dev/null
 }
 
 render_serviceaccount() {
@@ -350,15 +339,17 @@ wait_for_deployment_ready() {
     || fatal "timeout waiting for deployment readiness"
   log "deployment ready"
 }
-
 rest_smoke() {
-  local base
+  local base smoke_pod
   base="$(rest_base_url)"
-  log "running REST smoke"
+  smoke_pod="iceberg-rest-smoke-$(date +%s)-$$"
 
-  cat <<'PY' | kubectl -n "${TARGET_NS}" run iceberg-rest-smoke --rm -i --restart=Never \
+  log "running REST smoke"
+  log "REST smoke base_url=${base}"
+
+  cat <<'PY' | kubectl -n "${TARGET_NS}" run "${smoke_pod}" --rm -i --restart=Never \
     --image=python:3.12-slim \
-    --env BASE_URL="${base}" \
+    --env="BASE_URL=${base}" \
     --command -- python /dev/stdin
 from __future__ import annotations
 
@@ -370,69 +361,72 @@ from urllib.request import Request, urlopen
 
 base = os.environ["BASE_URL"].rstrip("/")
 
-def fetch(path: str, *, method: str = "GET", body: bytes | None = None, headers: dict[str, str] | None = None):
+def request(path: str, *, method: str = "GET", body: bytes | None = None, headers: dict[str, str] | None = None):
     req = Request(f"{base}{path}", data=body, method=method, headers=headers or {})
     try:
         with urlopen(req, timeout=20) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-            print(f"GET {path} -> {resp.status}")
+            print(f"{method} {path} -> {resp.status}")
             if raw:
-                print(raw[:2000])
+                print(raw[:4000])
             return resp.status, raw
     except HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
-        print(f"HTTPError {method} {path} -> {exc.code}", file=sys.stderr)
+        print(f"{method} {path} -> {exc.code}", file=sys.stderr)
         if raw:
             print(raw[:4000], file=sys.stderr)
-        raise
+        return exc.code, raw
     except URLError as exc:
-        print(f"URLError {method} {path} -> {exc}", file=sys.stderr)
+        print(f"{method} {path} -> {exc}", file=sys.stderr)
         raise
 
-status, body = fetch("/v1/config")
+status, body = request("/v1/config")
 if status != 200:
     raise SystemExit(f"unexpected /v1/config status: {status}")
 
-try:
-    parsed = json.loads(body)
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"/v1/config did not return valid JSON: {exc}") from exc
-
+parsed = json.loads(body)
 if not isinstance(parsed, dict):
-    raise SystemExit(f"/v1/config returned unexpected payload type: {type(parsed)!r}")
+    raise SystemExit(f"/v1/config returned unexpected payload: {type(parsed)!r}")
 
-status, body = fetch("/v1/namespaces")
+status, body = request("/v1/namespaces")
 if status != 200:
     raise SystemExit(f"unexpected /v1/namespaces status: {status}")
 
+namespaces = []
 try:
-    json.loads(body)
-except json.JSONDecodeError as exc:
-    raise SystemExit(f"/v1/namespaces did not return valid JSON: {exc}") from exc
+    namespaces = json.loads(body).get("namespaces", [])
+except Exception:
+    pass
 
-payload = json.dumps({"namespace": ["mlsecops_smoke"]}).encode("utf-8")
-status, body = fetch(
-    "/v1/namespaces",
-    method="POST",
-    body=payload,
-    headers={"Content-Type": "application/json"},
+already_exists = any(
+    (isinstance(item, list) and item == ["mlsecops_smoke"]) or
+    (isinstance(item, tuple) and tuple(item) == ("mlsecops_smoke",))
+    for item in namespaces
 )
 
-if status not in {200, 201, 204, 409}:
-    raise SystemExit(f"unexpected namespace create status: {status}")
+if not already_exists:
+    payload = json.dumps({"namespace": ["mlsecops_smoke"]}).encode("utf-8")
+    status, body = request(
+        "/v1/namespaces",
+        method="POST",
+        body=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    if status not in {200, 201, 204, 409}:
+        raise SystemExit(f"unexpected namespace create status: {status}")
 
 print("rest_smoke_ok")
 PY
+
   log "REST smoke passed"
 }
-
 spark_smoke() {
   if [[ -z "${SPARK_PROBE_IMAGE}" ]]; then
     log "SPARK_PROBE_IMAGE not set; skipping Spark smoke"
     return 0
   fi
 
-  local ak sk token warehouse uri
+  local ak sk token warehouse uri spark_pod
   ak="$(
     kubectl -n "${TARGET_NS}" get secret "${SECRET_NAME}" \
       -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' 2>/dev/null | base64 -d || true
@@ -447,6 +441,7 @@ spark_smoke() {
   )"
   warehouse="$(warehouse_uri)"
   uri="$(rest_base_url)"
+  spark_pod="iceberg-spark-probe-$(date +%s)-$$"
 
   if [[ -z "${ak}" || -z "${sk}" ]]; then
     log "AWS creds not available for Spark smoke; skipping"
@@ -454,8 +449,10 @@ spark_smoke() {
   fi
 
   log "running Spark smoke"
-  {
-    cat <<'PY'
+
+  local tmp_py
+  tmp_py="$(mktemp)"
+  cat > "${tmp_py}" <<'PY'
 from __future__ import annotations
 
 import os
@@ -492,16 +489,24 @@ spark.sql(f"CREATE NAMESPACE IF NOT EXISTS iceberg.{ns}")
 spark.sql(f"DROP NAMESPACE IF EXISTS iceberg.{ns}")
 print("spark_smoke_ok")
 PY
-  } | kubectl -n "${TARGET_NS}" run iceberg-spark-probe --rm -i --restart=Never \
-      --image="${SPARK_PROBE_IMAGE}" \
-      --env SPARK_LOCAL_HOSTNAME=localhost \
-      --env AWS_REGION="${AWS_REGION}" \
-      --env AWS_ACCESS_KEY_ID="${ak}" \
-      --env AWS_SECRET_ACCESS_KEY="${sk}" \
-      ${token:+--env AWS_SESSION_TOKEN="${token}"} \
-      --env ICEBERG_URI="${uri}" \
-      --env ICEBERG_WAREHOUSE="${warehouse}" \
-      --command -- python /dev/stdin
+
+  local args=(
+    kubectl -n "${TARGET_NS}" run "${spark_pod}" --rm -i --restart=Never
+    --image="${SPARK_PROBE_IMAGE}"
+    --env "SPARK_LOCAL_HOSTNAME=localhost"
+    --env "AWS_REGION=${AWS_REGION}"
+    --env "AWS_ACCESS_KEY_ID=${ak}"
+    --env "AWS_SECRET_ACCESS_KEY=${sk}"
+  )
+
+  if [[ -n "${token}" ]]; then
+    args+=(--env "AWS_SESSION_TOKEN=${token}")
+  fi
+
+  args+=(--env "ICEBERG_URI=${uri}" --env "ICEBERG_WAREHOUSE=${warehouse}" --command -- python /dev/stdin)
+
+  "${args[@]}" < "${tmp_py}"
+  rm -f "${tmp_py}"
 
   log "Spark smoke passed"
 }
