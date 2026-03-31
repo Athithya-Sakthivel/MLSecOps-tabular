@@ -1,0 +1,146 @@
+# Workflow reliability rules for the ELT pipeline.
+# Goal:
+#   Catch Flyte-level and task-level patterns that make the ELT run flaky or unsafe to
+#   rerun, without mixing them with pure Spark performance rules.
+
+rules:
+  # 1) Check-then-act writes.
+  #
+  # Why this is required:
+  #   - The code currently checks whether an Iceberg table exists and then decides whether
+  #     to create or overwrite partitions.
+  #   - That is a classic race condition if two runs overlap, or if retries happen while a
+  #     previous attempt is still in flight.
+  #   - This is not just a table-format concern; it is an orchestration and idempotency concern.
+  - id: elt.reliability.check-then-act-iceberg-write
+    message: >
+      An Iceberg write is guarded by a table-exists check in the same flow. This is a
+      check-then-act pattern and can race under concurrent runs. Prefer an atomic create
+      path, an orchestration lock, or a transactional merge/upsert strategy.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: reliability
+      technology: ["python", "pyspark", "iceberg", "flyte"]
+      confidence: medium
+      impact: high
+      tags:
+        - idempotency
+        - race-condition
+        - iceberg
+        - write-path
+    paths:
+      include:
+        - "src/workflows/ELT/tasks/**/*.py"
+    patterns:
+      - pattern-inside: |
+          if table_exists(...):
+            ...
+          else:
+            ...
+      - pattern-either:
+          - pattern: $WRITER.create()
+          - pattern: $WRITER.partitionedBy(...).create()
+          - pattern: $WRITER.overwritePartitions()
+
+  # 2) collect()/toPandas()/rdd.collect() inside loops.
+  #
+  # Why this is required:
+  #   - Repeated driver materialization inside a loop is a common stability problem.
+  #   - Even when each iteration looks small, the cumulative effect can explode runtime
+  #     and driver memory pressure.
+  #   - This is a stricter companion to the unbounded-collection rule in reliability and
+  #     keeps the obvious loop case from slipping through.
+  - id: elt.reliability.collection-inside-loop
+    message: >
+      Driver-side collection is occurring inside a loop. This creates repeated Spark actions,
+      hurts reliability, and can blow up driver memory or job time. Pull bounded data once,
+      or move the work into Spark.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: reliability
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: high
+      tags:
+        - loop
+        - collect
+        - driver-memory
+        - spark-actions
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  for $ITEM in $ITER:
+                    ...
+              - pattern: $DF.collect()
+          - patterns:
+              - pattern-inside: |
+                  while $COND:
+                    ...
+              - pattern: $DF.collect()
+          - patterns:
+              - pattern-inside: |
+                  for $ITEM in $ITER:
+                    ...
+              - pattern: $DF.toPandas()
+          - patterns:
+              - pattern-inside: |
+                  while $COND:
+                    ...
+              - pattern: $DF.toPandas()
+          - patterns:
+              - pattern-inside: |
+                  for $ITEM in $ITER:
+                    ...
+              - pattern: $DF.rdd.collect()
+          - patterns:
+              - pattern-inside: |
+                  while $COND:
+                    ...
+              - pattern: $DF.rdd.collect()
+
+  # 3) unionByName inside a loop.
+  #
+  # Why this is required:
+  #   - The bronze ingestion path currently builds a DataFrame batch-by-batch and unions
+  #     those batches together.
+  #   - Repeating that pattern without care can create long Spark lineages and make the
+  #     pipeline slower and harder to debug.
+  #   - This rule is narrowly scoped to looped unions, which is where the risk lives.
+  - id: elt.reliability.unionbyname-inside-loop
+    message: >
+      unionByName() is being called inside a loop. That creates long Spark lineages and
+      can become slow or unstable at scale. Accumulate batches first, then union once,
+      or write each batch independently.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: reliability
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: high
+      tags:
+        - lineage
+        - union
+        - batch-processing
+        - spark-plans
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  for $ITEM in $ITER:
+                    ...
+              - pattern: $ACC.unionByName($NEXT)
+          - patterns:
+              - pattern-inside: |
+                  while $COND:
+                    ...
+              - pattern: $ACC.unionByName($NEXT)

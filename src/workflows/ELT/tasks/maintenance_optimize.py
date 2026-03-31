@@ -20,7 +20,6 @@ from src.workflows.ELT.tasks.bronze_ingest import (
     GOLD_CONTRACT_TABLE,
     GOLD_TRAINING_TABLE,
     SILVER_TRIPS_TABLE,
-    TASK_IMAGE,
     build_hadoop_conf,
     build_spark_conf,
     build_task_environment,
@@ -113,7 +112,7 @@ def utc_cutoff_string(days: int) -> str:
 
 
 def execute_sql_action(spark: SparkSession, statement: str) -> None:
-    spark.sql(statement).rdd.foreachPartition(lambda _: None)
+    spark.sql(statement).collect()
 
 
 def expire_snapshots_call(table_id: str, older_than: str) -> str:
@@ -239,7 +238,6 @@ def maintenance_spark_conf() -> dict[str, str]:
         hadoop_conf=build_hadoop_conf(),
         executor_path="/opt/venv/bin/python",
     ),
-    container_image=TASK_IMAGE,
     environment=build_task_environment(),
     retries=_env_int("MAINTENANCE_TASK_RETRIES", 1, minimum=0),
     limits=Resources(
@@ -253,10 +251,7 @@ def maintenance_optimize() -> MaintenanceResult:
     validate_iceberg_catalog(spark)
 
     run_id = os.environ.get("RUN_ID") or os.environ.get("FLYTE_INTERNAL_EXECUTION_ID") or uuid.uuid4().hex
-    continue_on_error = parse_bool(
-        os.environ.get("MAINTENANCE_CONTINUE_ON_ERROR"),
-        default=True,
-    )
+    continue_on_error = parse_bool(os.environ.get("MAINTENANCE_CONTINUE_ON_ERROR"), default=True)
 
     expire_tables = parse_table_list(
         "ICEBERG_MAINTENANCE_EXPIRE_TABLES",
@@ -322,12 +317,12 @@ def maintenance_optimize() -> MaintenanceResult:
             table_results.append(
                 table_op_result(
                     table_id=table_id,
-                    operation="expire_orphan",
+                    operation="expire_snapshots",
                     status="skipped",
                     message="table_missing",
                 )
             )
-            log_json(msg="maintenance_skip_missing_table", table=table_id, phase="expire_orphan")
+            log_json(msg="maintenance_skip_missing_table", table=table_id, phase="expire_snapshots")
             continue
 
         try:

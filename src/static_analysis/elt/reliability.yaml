@@ -1,0 +1,137 @@
+# Reliability rules for the ELT pipeline.
+# Goal:
+#   Catch patterns that make Flyte/Spark jobs flaky, non-idempotent, or expensive to rerun.
+#
+# Scope:
+#   These are runtime-stability rules, not data-quality rules. The distinction matters:
+#   reliability issues usually manifest as job failure, retry churn, or very slow tasks.
+
+rules:
+  # 1) Pulling large Spark data back to the driver.
+  #
+  # Why this is required:
+  #   - collect(), toPandas(), and rdd.collect() all materialize data on the driver.
+  #   - That is fine for tiny metadata probes, but dangerous for anything unbounded.
+  #   - The helper exclusions below keep the rule from flagging the known tiny lookup
+  #     patterns in this repository.
+  - id: elt.reliability.unbounded-driver-collection
+    message: >
+      Spark data is being materialized on the driver with collect(), toPandas(), or
+      rdd.collect(). Keep this restricted to tiny, explicitly bounded lookup data.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: reliability
+      technology: ["python", "pyspark", "flyte"]
+      confidence: high
+      impact: high
+      tags:
+        - driver-memory
+        - materialization
+        - spark
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          - pattern: $DF.collect()
+          - pattern: $DF.toPandas()
+          - pattern: $DF.rdd.collect()
+      # Known-safe bounded patterns should not trip this rule.
+      - pattern-not: $DF.limit(...).collect()
+      - pattern-not: $DF.limit(...).toPandas()
+      # The repository has two intentional tiny-lookup collection helpers. They are
+      # explicitly excluded so the rule stays useful in CI instead of noisy.
+      - pattern-not-inside: |
+          def table_exists(...):
+            ...
+      - pattern-not-inside: |
+          def distinct_service_zone_values(...):
+            ...
+
+  # 2) Repeated unionByName inside a loop.
+  #
+  # Why this is required:
+  #   - Repeated unions create long Spark lineages and more expensive execution plans.
+  #   - In batch-ingestion code, this can turn a simple stream-to-DataFrame build into a
+  #     very expensive job.
+  #   - The rule only fires when the union is inside an explicit loop, which keeps it
+  #     focused on the real failure mode.
+  - id: elt.reliability.unionbyname-inside-loop
+    message: >
+      unionByName() is being called inside a loop. That creates long Spark lineages and
+      can become slow or unstable at scale. Accumulate batches first, then union once,
+      or write each batch independently.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: reliability
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: high
+      tags:
+        - lineage
+        - union
+        - batch-processing
+        - spark-plans
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: |
+                  for $ITEM in $ITER:
+                    ...
+              - pattern: $ACC.unionByName($NEXT)
+          - patterns:
+              - pattern-inside: |
+                  while $COND:
+                    ...
+              - pattern: $ACC.unionByName($NEXT)
+
+  # 3) Check-then-act Iceberg writes.
+  #
+  # Why this is required:
+  #   - The code currently checks table existence and then decides whether to create or
+  #     overwrite partitions.
+  #   - That is a classic race window if two tasks run concurrently.
+  #   - It is not a correctness bug in a single-run dev path, but it becomes one under
+  #     retries, duplicate launches, or backfills.
+  #
+  # What this rule catches:
+  #   - A table_exists() branch followed by an Iceberg create / overwritePartitions call.
+  #   - The goal is to force engineers to think about atomicity, orchestration locks,
+  #     or other idempotent write strategies.
+  - id: elt.reliability.check-then-act-iceberg-write
+    message: >
+      An Iceberg write is guarded by a table-exists check in the same flow. This is a
+      check-then-act pattern and can race under concurrent runs. Prefer an atomic create
+      path, an orchestration lock, or a transactional merge/upsert strategy.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: reliability
+      technology: ["python", "pyspark", "iceberg", "flyte"]
+      confidence: medium
+      impact: high
+      tags:
+        - idempotency
+        - race-condition
+        - iceberg
+        - write-path
+    paths:
+      include:
+        - "src/workflows/ELT/tasks/**/*.py"
+    patterns:
+      - pattern-inside: |
+          if table_exists(...):
+            ...
+          else:
+            ...
+      - pattern-either:
+          # Table creation path.
+          - pattern: $WRITER.create()
+          - pattern: $WRITER.partitionedBy(...).create()
+          # Partition overwrite path.
+          - pattern: $WRITER.overwritePartitions()

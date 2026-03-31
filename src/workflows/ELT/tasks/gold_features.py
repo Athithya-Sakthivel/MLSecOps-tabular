@@ -24,7 +24,7 @@ from src.workflows.ELT.tasks.bronze_ingest import (
     GOLD_NAMESPACE,
     GOLD_TRAINING_TABLE,
     ICEBERG_TARGET_FILE_SIZE_BYTES,
-    TASK_IMAGE,
+    SILVER_NAMESPACE,
     build_hadoop_conf,
     build_spark_conf,
     build_task_environment,
@@ -85,7 +85,6 @@ if ELT_PROFILE == "prod":
     SPARK_SHUFFLE_PARTITIONS = _env_str("SPARK_SHUFFLE_PARTITIONS", "8")
     SPARK_MAX_PARTITION_BYTES = _env_str("SPARK_MAX_PARTITION_BYTES", "134217728")
     SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "256m")
-    TASK_RETRIES = _env_int("GOLD_TASK_RETRIES", 1, minimum=0)
 else:
     TASK_LIMITS = Resources(cpu="500m", mem="768Mi")
     GOLD_REPARTITIONS = _env_int("GOLD_REPARTITIONS", 4, minimum=1)
@@ -788,7 +787,6 @@ def _build_contract_df(spark, *, row: dict[str, Any]) -> DataFrame:
         hadoop_conf=build_hadoop_conf(),
         executor_path="/opt/venv/bin/python",
     ),
-    container_image=TASK_IMAGE,
     environment=build_task_environment(),
     retries=TASK_RETRIES,
     limits=TASK_LIMITS,
@@ -805,6 +803,7 @@ def gold_features(silver: SilverTransformResult) -> GoldFeatureResult:
 
     ensure_namespace(spark, CATALOG_NAME, GOLD_NAMESPACE)
     ensure_namespace(spark, CATALOG_NAME, BRONZE_NAMESPACE)
+    ensure_namespace(spark, CATALOG_NAME, SILVER_NAMESPACE)
 
     log_json(
         msg="gold_features_start",

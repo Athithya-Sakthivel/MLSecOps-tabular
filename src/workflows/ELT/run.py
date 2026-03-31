@@ -39,12 +39,16 @@ ELT_PROFILE = (
     .lower()
 )
 
-SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark")
+SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark").strip() or "spark"
 ELT_TASK_IMAGE = os.environ.get(
     "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-31-06-19--fe89842").strip()
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-31-07-13--8cb3f14",
+).strip()
 if not ELT_TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must not be empty")
+
+# Make the task image available to imported workflow modules and the pyflyte subprocess.
+os.environ["ELT_TASK_IMAGE"] = ELT_TASK_IMAGE
 
 WORKFLOW_SOURCE_FILE = SRC_ROOT / "workflows" / "ELT" / "launch_plans.py"
 WORKFLOW_SOURCE_REL = WORKFLOW_SOURCE_FILE.relative_to(SRC_ROOT)
@@ -338,13 +342,13 @@ metadata:
   namespace: {TASK_NAMESPACE}
 spec:
   hard:
-    requests.cpu: "{q["requests_cpu"]}"
-    requests.memory: "{q["requests_memory"]}"
-    limits.cpu: "{q["limits_cpu"]}"
-    limits.memory: "{q["limits_memory"]}"
-    pods: "{q["pods"]}"
-    persistentvolumeclaims: "{q["persistentvolumeclaims"]}"
-    services: "{q["services"]}"
+    requests.cpu: "{q['requests_cpu']}"
+    requests.memory: "{q['requests_memory']}"
+    limits.cpu: "{q['limits_cpu']}"
+    limits.memory: "{q['limits_memory']}"
+    pods: "{q['pods']}"
+    persistentvolumeclaims: "{q['persistentvolumeclaims']}"
+    services: "{q['services']}"
 """
 
 
@@ -452,6 +456,12 @@ def registration_tree_files() -> list[Path]:
 def compute_registration_version() -> str:
     git_sha = run_cmd(["git", "rev-parse", "HEAD"], capture_output=True).stdout.strip()
     tree = hashlib.sha256()
+    tree.update(f"ELT_TASK_IMAGE={ELT_TASK_IMAGE}".encode())
+    tree.update(b"\0")
+    tree.update(f"ELT_PROFILE={ELT_PROFILE}".encode())
+    tree.update(b"\0")
+    tree.update(f"K8S_CLUSTER={K8S_CLUSTER}".encode())
+    tree.update(b"\0")
     for path in registration_tree_files():
         tree.update(path.relative_to(REPO_ROOT).as_posix().encode("utf-8"))
         tree.update(b"\0")
@@ -478,6 +488,14 @@ def pyflyte_register_supports_copy_or_fast_flag() -> tuple[bool, bool]:
     help_text = run_cmd(["pyflyte", "register", "--help"], check=False, capture_output=True)
     combined = f"{help_text.stdout}\n{help_text.stderr}"
     return ("--copy" in combined, "--fast" in combined)
+
+
+def build_register_env() -> dict[str, str]:
+    register_env = os.environ.copy()
+    register_env["ELT_TASK_IMAGE"] = ELT_TASK_IMAGE
+    existing_pythonpath = register_env.get("PYTHONPATH", "")
+    register_env["PYTHONPATH"] = str(SRC_ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+    return register_env
 
 
 def build_register_command(registration_version: str) -> list[str]:
@@ -557,11 +575,10 @@ def register_entities() -> str:
     log(f"Workflow import module: {WORKFLOW_IMPORT_MODULE}")
     log(f"Source file: {WORKFLOW_SOURCE_FILE}")
     log(f"Profile: {ELT_PROFILE} | Cluster: {K8S_CLUSTER} | Namespace: {TASK_NAMESPACE}")
+    log(f"Task image: {ELT_TASK_IMAGE}")
     log(f"Registration version: {registration_version}")
 
-    register_env = os.environ.copy()
-    existing_pythonpath = register_env.get("PYTHONPATH", "")
-    register_env["PYTHONPATH"] = str(SRC_ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
+    register_env = build_register_env()
 
     cmd = build_register_command(registration_version)
     run_cmd(cmd, cwd=SRC_ROOT, env=register_env)

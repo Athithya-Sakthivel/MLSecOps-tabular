@@ -1,0 +1,111 @@
+# Spark performance rules for the ELT pipeline.
+# Goal:
+#   Catch patterns that do not necessarily break correctness, but do create avoidable
+#   resource pressure, slow jobs, or expensive execution plans.
+#
+# Scope:
+#   Keep this file focused on execution shape and shuffle-heavy transformations.
+
+rules:
+  # 1) Shrinking a DataFrame to one partition.
+  #
+  # Why this is required:
+  #   - coalesce(1) and repartition(1) force the output through a single partition.
+  #   - That is acceptable only for tiny lookup-style outputs.
+  #   - This repo has one intentional tiny-table use in bronze ingestion; that helper is
+  #     excluded so the rule remains CI-useful.
+  - id: elt.spark.single-partition-shrink
+    message: >
+      A DataFrame is being forced into a single partition. This creates a bottleneck and
+      can spill a large shuffle to one executor. Use only for outputs that are guaranteed
+      to be tiny.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: spark-performance
+      technology: ["python", "pyspark", "flyte"]
+      confidence: high
+      impact: high
+      tags:
+        - single-partition
+        - shuffle
+        - bottleneck
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          - pattern: $DF.coalesce(1)
+          - pattern: $DF.repartition(1)
+          - pattern: $DF.repartition(numPartitions=1)
+          - pattern: $DF.repartition(1, ...)
+          - pattern: $DF.repartition(numPartitions=1, ...)
+      # The taxi-zone bronze helper intentionally coalesces a tiny lookup table to one
+      # partition. Exclude that known safe path so the rule only targets future large
+      # datasets.
+      - pattern-not-inside: |
+          def add_zone_bronze_columns(...):
+            ...
+
+  # 2) Large time-range windows.
+  #
+  # Why this is required:
+  #   - rangeBetween() on an ordered window is one of the more expensive patterns in
+  #     feature engineering code.
+  #   - As the time horizon grows, the amount of state and shuffle pressure grows too.
+  #   - The gold feature stage is the right place to monitor this because future feature
+  #     additions are likely to copy the same pattern.
+  - id: elt.spark.large-range-window-frame
+    message: >
+      rangeBetween() over an ordered Spark window can be expensive at production scale,
+      especially for multi-day feature windows. Prefer bounded-row windows, pre-aggregation,
+      or a dedicated offline feature computation path when possible.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: spark-performance
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: medium
+      tags:
+        - windowing
+        - rangebetween
+        - feature-engineering
+    paths:
+      include:
+        - "src/workflows/ELT/tasks/gold_features.py"
+    patterns:
+      - pattern-either:
+          - pattern: Window.partitionBy(...).orderBy(...).rangeBetween(...)
+          - pattern: Window.orderBy(...).rangeBetween(...)
+
+  # 3) Cartesian or cross joins.
+  #
+  # Why this is required:
+  #   - A missing join predicate can silently turn a point lookup into a row explosion.
+  #   - In Spark this is both a correctness risk and a performance risk.
+  #   - The rule is intentionally strict because cross joins in ELT code are almost never
+  #     acceptable without a very explicit reason.
+  - id: elt.spark.cartesian-join
+    message: >
+      Cartesian joins or explicit cross joins are extremely expensive and usually indicate
+      a missing join predicate. Use an explicit join key and only allow cross joins when
+      the result size is provably tiny.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: spark-performance
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: high
+      tags:
+        - cartesian-product
+        - cross-join
+        - shuffle
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    pattern-either:
+      - pattern: $DF.crossJoin($OTHER)
+      - pattern: $DF.join($OTHER, ..., "cross")
+      - pattern: $DF.join($OTHER, ..., how="cross")

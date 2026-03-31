@@ -1,0 +1,89 @@
+# Data-quality rules for the ELT pipeline.
+# Goal:
+#   Prevent silent schema drift and row-shape bugs that do not necessarily crash jobs
+#   but do corrupt Bronze/Silver/Gold outputs.
+#
+# Scope:
+#   Keep these rules focused on high-signal transformations that are dangerous in this
+#   codebase: joins, deduplication, and post-join projection.
+
+rules:
+  # 1) Dropping duplicates without explicit keys.
+  #
+  # Why this is required:
+  #   - No-key deduplication is almost always a mistake in ETL code.
+  #   - It silently collapses distinct records and can hide upstream data issues.
+  #   - In ML pipelines, this can distort training distributions without obvious failures.
+  #
+  # What this intentionally does not flag:
+  #   - Keyed deduplication. This repo has one intentional keyed dedup on taxi zones.
+  #     That case is not a blanket correctness bug, so it is left alone.
+  - id: elt.data.dropduplicates-without-keys
+    message: >
+      dropDuplicates() is being used without a key list. That can silently collapse
+      unrelated rows and hide upstream data issues. Prefer explicit dedup keys or a
+      deterministic window-based dedup strategy.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: data-quality
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: high
+      tags:
+        - deduplication
+        - row-loss
+        - data-quality
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          # The most dangerous variant: dedup with no subset keys.
+          - pattern: $DF.dropDuplicates()
+          # Explicitly empty subset is equally unsafe.
+          - pattern: $DF.dropDuplicates([])
+
+  # 2) Selecting "*" after a join.
+  #
+  # Why this is required:
+  #   - Joins are where schema drift becomes visible.
+  #   - A select("*") after a join can produce ambiguous columns, duplicate names,
+  #     and unstable downstream schemas.
+  #   - Explicit projection is far safer in Bronze/Silver/Gold pipelines.
+  #
+  # Why it is scoped this way:
+  #   - The rule only fires when the join result is immediately projected with "*".
+  #   - That keeps it high-signal and avoids flagging ordinary select("*") use on a
+  #     single table.
+  - id: elt.data.select-star-after-join
+    message: >
+      select("*") is being applied to a joined DataFrame. That can introduce ambiguous
+      or duplicated columns and makes downstream schema evolution harder to control.
+      Project explicit columns instead.
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: data-quality
+      technology: ["python", "pyspark"]
+      confidence: high
+      impact: high
+      tags:
+        - schema-drift
+        - join
+        - projection
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          # Inline join followed by star projection.
+          - pattern: $DF.join($OTHER, ...).select("*")
+          - pattern: $DF.join($OTHER, ...).select("*", ...)
+          - pattern: $DF.join($OTHER, ..., how="inner").select("*")
+          - pattern: $DF.join($OTHER, ..., how="left").select("*")
+          - pattern: $DF.join($OTHER, ..., how="right").select("*")
+          - pattern: $DF.join($OTHER, ..., how="outer").select("*")
+          # Single-quoted star variants.
+          - pattern: $DF.join($OTHER, ...).select('*')
+          - pattern: $DF.join($OTHER, ...).select('*', ...)

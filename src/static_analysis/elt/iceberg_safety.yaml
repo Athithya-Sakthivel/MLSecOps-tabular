@@ -1,0 +1,185 @@
+# Iceberg safety rules for the ELT pipeline.
+# Goal:
+#   Prevent destructive Iceberg operations and overly broad maintenance behavior from
+#   slipping into non-maintenance code.
+#
+# Scope:
+#   Only Python files under the ELT workflow tree. The maintenance workflow is excluded
+#   from the "outside maintenance" rules because it intentionally performs these actions.
+
+rules:
+  # 1) Full-table overwrite.
+  #
+  # Why this is required:
+  #   - A full overwrite replaces the entire table state.
+  #   - In an incremental ELT pipeline, that can destroy historical data or mask upstream
+  #     bugs by re-materializing everything from scratch.
+  #   - This should only happen in an explicitly approved full-refresh path.
+  - id: elt.iceberg.full-table-overwrite
+    message: >
+      Full-table Iceberg overwrite detected. This is destructive and should only be
+      used for an explicitly approved full-refresh path. Prefer overwritePartitions(),
+      row-level merge logic, or a keyed incremental write strategy.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg", "flyte"]
+      confidence: high
+      impact: high
+      cwe: "CWE-732"
+      tags:
+        - iceberg
+        - overwrite
+        - destructive-write
+        - data-loss
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          # Direct overwrite with constant true.
+          - pattern: $WRITER.overwrite(F.lit(True))
+          # Direct overwrite with literal true.
+          - pattern: $WRITER.overwrite(True)
+
+  # 2) Expiring snapshots is maintenance-only.
+  #
+  # Why this is required:
+  #   - Expiring snapshots removes rollback history and can break recovery/time-travel.
+  #   - This belongs in the dedicated maintenance workflow, not in normal ELT task code.
+  #   - The maintenance module itself is excluded so the approved call site stays clean.
+  - id: elt.iceberg.expire-snapshots-outside-maintenance
+    message: >
+      Iceberg snapshot expiration is a destructive maintenance operation. Keep it
+      isolated to the approved maintenance workflow and review retain_last carefully
+      before use.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags:
+        - snapshot-expiration
+        - maintenance
+        - rollback-risk
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+      exclude:
+        - "src/workflows/ELT/tasks/maintenance_optimize.py"
+    patterns:
+      - pattern-either:
+          # Helper-based maintenance execution path.
+          - pattern: execute_sql_action($SPARK, expire_snapshots_call(...))
+          # Generic inline Spark SQL call in case the maintenance procedure is inlined.
+          - pattern: $SPARK.sql($SQL)
+      # Restrict the generic SQL match to the actual Iceberg procedure name.
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?s).*system\.expire_snapshots\s*\(.*\).*
+
+  # 3) Orphan-file cleanup is maintenance-only.
+  #
+  # Why this is required:
+  #   - Orphan file removal deletes storage objects that are no longer referenced by table metadata.
+  #   - If used in the wrong place, it can remove data that is still needed.
+  #   - The approved maintenance module is excluded so the rule only flags accidental reuse.
+  - id: elt.iceberg.remove-orphan-files-outside-maintenance
+    message: >
+      Iceberg orphan-file cleanup deletes storage objects that are no longer referenced
+      by table metadata. Keep this limited to the approved maintenance workflow.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags:
+        - orphan-files
+        - delete
+        - maintenance
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+      exclude:
+        - "src/workflows/ELT/tasks/maintenance_optimize.py"
+    patterns:
+      - pattern-either:
+          - pattern: execute_sql_action($SPARK, remove_orphan_files_call(...))
+          - pattern: $SPARK.sql($SQL)
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?s).*system\.remove_orphan_files\s*\(.*\).*
+
+  # 4) Rewrite / compaction is also maintenance-only.
+  #
+  # Why this is required:
+  #   - rewrite_data_files can rewrite many data files and is expensive.
+  #   - In the wrong code path it can become a broad, hard-to-review table operation.
+  #   - Keep it isolated to the maintenance workflow.
+  - id: elt.iceberg.rewrite-data-files-outside-maintenance
+    message: >
+      Iceberg rewrite_data_files is a compaction/rewrite operation that can be expensive
+      and risky if used with a broad or incorrect predicate. Keep it isolated to the
+      approved maintenance workflow.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags:
+        - rewrite-data-files
+        - compaction
+        - maintenance
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+      exclude:
+        - "src/workflows/ELT/tasks/maintenance_optimize.py"
+    patterns:
+      - pattern-either:
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call(...))
+          - pattern: $SPARK.sql($SQL)
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?s).*system\.rewrite_data_files\s*\(.*\).*
+
+  # 5) Obviously broad rewrite predicates.
+  #
+  # Why this is required:
+  #   - Even when rewrite_data_files is used in the correct maintenance module, a predicate
+  #     like true or 1=1 can rewrite everything.
+  #   - That is too broad for safe maintenance unless there is a very specific operational
+  #     reason and review trail.
+  - id: elt.iceberg.broad-rewrite-data-files-predicate
+    message: >
+      rewrite_data_files is being called with an obviously broad predicate such as true,
+      1=1, or an empty filter. That can rewrite far more data than intended.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags:
+        - rewrite-data-files
+        - broad-predicate
+        - compaction
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call($TABLE, "true"))
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call($TABLE, "1=1"))
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call($TABLE, ""))
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call($TABLE, 'true'))
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call($TABLE, '1=1'))
+          - pattern: execute_sql_action($SPARK, rewrite_data_files_call($TABLE, ''))

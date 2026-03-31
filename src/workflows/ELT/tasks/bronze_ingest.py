@@ -108,11 +108,6 @@ TAXI_ZONE_LOOKUP_URL = os.environ.get(
 ).strip()
 HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or None
 
-TASK_IMAGE = os.environ.get(
-    "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-03-30-20-31--484f677",
-).strip()
-
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
     value = int(os.environ.get(name, str(default)))
@@ -164,6 +159,20 @@ def _spark_memory_env(name: str, default: str, minimum_mib: int) -> str:
     raw = _env_str(name, default)
     mib = max(_parse_memory_to_mib(raw), minimum_mib)
     return _format_memory_from_mib(mib)
+
+
+def _normalize_http_endpoint(value: str, *, default: str) -> str:
+    candidate = (value or "").strip()
+    if not candidate:
+        candidate = default.strip()
+    if candidate.startswith("http://") or candidate.startswith("https://"):
+        return candidate.rstrip("/")
+    return f"https://{candidate.rstrip('/')}"
+
+
+def _spark_s3_endpoint() -> str:
+    default = f"https://s3.{AWS_REGION}.amazonaws.com"
+    return _normalize_http_endpoint(S3_ENDPOINT, default=default)
 
 
 if IS_PROD:
@@ -337,6 +346,17 @@ def build_aws_runtime_env() -> dict[str, str]:
         "ICEBERG_REST_URI": ICEBERG_REST_URI,
         "ICEBERG_REST_AUTH_TYPE": ICEBERG_REST_AUTH_TYPE,
         "ICEBERG_WAREHOUSE": ICEBERG_WAREHOUSE,
+        "SPARK_SQL_CATALOG_ICEBERG_TYPE": "rest",
+        "SPARK_SQL_CATALOG_ICEBERG_URI": ICEBERG_REST_URI,
+        "SPARK_SQL_CATALOG_ICEBERG_WAREHOUSE": ICEBERG_WAREHOUSE,
+        "SPARK_SQL_CATALOG_ICEBERG_IO_IMPL": "org.apache.iceberg.aws.s3.S3FileIO",
+        "SPARK_SQL_CATALOG_ICEBERG_REST_AUTH_TYPE": ICEBERG_REST_AUTH_TYPE,
+        "SPARK_SQL_CATALOG_ICEBERG_CLIENT_REGION": AWS_REGION,
+        "SPARK_SQL_CATALOG_ICEBERG_S3_ENDPOINT": _spark_s3_endpoint(),
+        "SPARK_SQL_CATALOG_ICEBERG_S3_PATH_STYLE_ACCESS": S3_PATH_STYLE_ACCESS,
+        "SPARK_SQL_CATALOG_ICEBERG_HADOOP_FS_S3A_ENDPOINT": _spark_s3_endpoint(),
+        "SPARK_SQL_CATALOG_ICEBERG_HADOOP_FS_S3A_PATH_STYLE_ACCESS": S3_PATH_STYLE_ACCESS,
+        "SPARK_SQL_CATALOG_ICEBERG_HADOOP_FS_S3A_AWS_CREDENTIALS_PROVIDER": _spark_s3a_credential_provider(),
     }
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         env["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
@@ -361,18 +381,14 @@ def build_task_environment() -> dict[str, str]:
 
 
 def build_hadoop_conf() -> dict[str, str]:
+    s3_endpoint = _spark_s3_endpoint()
     conf = {
         "fs.s3a.endpoint.region": AWS_REGION,
         "fs.s3a.aws.credentials.provider": _spark_s3a_credential_provider(),
         "fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "fs.s3a.endpoint": s3_endpoint,
+        "fs.s3a.path.style.access": S3_PATH_STYLE_ACCESS if S3_ENDPOINT else "false",
     }
-
-    if S3_ENDPOINT:
-        conf["fs.s3a.endpoint"] = S3_ENDPOINT
-        conf["fs.s3a.path.style.access"] = S3_PATH_STYLE_ACCESS
-    else:
-        conf["fs.s3a.endpoint"] = f"s3.{AWS_REGION}.amazonaws.com"
-        conf["fs.s3a.path.style.access"] = "false"
 
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         conf["fs.s3a.access.key"] = AWS_ACCESS_KEY_ID
@@ -400,6 +416,7 @@ def build_spark_conf(
     aws_env = build_aws_runtime_env()
     s3a_provider = _spark_s3a_credential_provider()
     spark_service_account = SPARK_SERVICE_ACCOUNT
+    s3_endpoint = _spark_s3_endpoint()
 
     conf = {
         f"spark.sql.catalog.{CATALOG_NAME}": "org.apache.iceberg.spark.SparkCatalog",
@@ -408,6 +425,9 @@ def build_spark_conf(
         f"spark.sql.catalog.{CATALOG_NAME}.warehouse": ICEBERG_WAREHOUSE,
         f"spark.sql.catalog.{CATALOG_NAME}.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
         f"spark.sql.catalog.{CATALOG_NAME}.rest.auth.type": ICEBERG_REST_AUTH_TYPE,
+        f"spark.sql.catalog.{CATALOG_NAME}.client.region": AWS_REGION,
+        f"spark.sql.catalog.{CATALOG_NAME}.s3.endpoint": s3_endpoint,
+        f"spark.sql.catalog.{CATALOG_NAME}.s3.path.style.access": S3_PATH_STYLE_ACCESS if S3_ENDPOINT else "false",
         "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
         "spark.sql.shuffle.partitions": spark_shuffle_partitions,
         "spark.sql.files.maxPartitionBytes": spark_max_partition_bytes,
@@ -434,14 +454,9 @@ def build_spark_conf(
         "spark.hadoop.fs.s3a.aws.credentials.provider": s3a_provider,
         "spark.hadoop.fs.s3a.endpoint.region": AWS_REGION,
         "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+        "spark.hadoop.fs.s3a.endpoint": s3_endpoint,
+        "spark.hadoop.fs.s3a.path.style.access": S3_PATH_STYLE_ACCESS if S3_ENDPOINT else "false",
     }
-
-    if S3_ENDPOINT:
-        conf["spark.hadoop.fs.s3a.endpoint"] = S3_ENDPOINT
-        conf["spark.hadoop.fs.s3a.path.style.access"] = S3_PATH_STYLE_ACCESS
-    else:
-        conf["spark.hadoop.fs.s3a.endpoint"] = f"s3.{AWS_REGION}.amazonaws.com"
-        conf["spark.hadoop.fs.s3a.path.style.access"] = "false"
 
     if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
         conf["spark.hadoop.fs.s3a.access.key"] = AWS_ACCESS_KEY_ID
@@ -616,13 +631,19 @@ def stream_to_dataframe(
         total_rows += 1
         if len(batch) >= chunk_size:
             batch_df = flush_batch(batch)
-            accumulated_df = batch_df if accumulated_df is None else accumulated_df.unionByName(batch_df)
+            accumulated_df = batch_df if accumulated_df is None else accumulated_df.unionByName(
+                batch_df,
+                allowMissingColumns=True,
+            )
             log_json(msg="materialized_batch", label=label, rows=total_rows, batch_rows=len(batch))
             batch.clear()
 
     if batch:
         batch_df = flush_batch(batch)
-        accumulated_df = batch_df if accumulated_df is None else accumulated_df.unionByName(batch_df)
+        accumulated_df = batch_df if accumulated_df is None else accumulated_df.unionByName(
+            batch_df,
+            allowMissingColumns=True,
+        )
         log_json(msg="materialized_final_batch", label=label, rows=total_rows, batch_rows=len(batch))
         batch.clear()
 
@@ -639,10 +660,15 @@ def cast_if_present(df: DataFrame, column: str, spark_type: str) -> DataFrame:
 
 
 def _safe_to_timestamp(column: F.Column) -> F.Column:
+    raw = F.trim(column.cast("string"))
     return F.coalesce(
-        F.to_timestamp(column),
-        F.to_timestamp(column, "yyyy-MM-dd HH:mm:ss"),
-        F.to_timestamp(column, "yyyy-MM-dd'T'HH:mm:ss"),
+        F.to_timestamp(raw),
+        F.to_timestamp(raw, "yyyy-MM-dd HH:mm:ss"),
+        F.to_timestamp(raw, "yyyy-MM-dd HH:mm:ss.SSS"),
+        F.to_timestamp(raw, "yyyy-MM-dd HH:mm:ss.SSSSSS"),
+        F.to_timestamp(raw, "yyyy-MM-dd'T'HH:mm:ss"),
+        F.to_timestamp(raw, "yyyy-MM-dd'T'HH:mm:ss.SSS"),
+        F.to_timestamp(raw, "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"),
     )
 
 
@@ -817,7 +843,6 @@ def _spark_tuning_summary() -> dict[str, Any]:
         hadoop_conf=build_hadoop_conf(),
         executor_path="/opt/venv/bin/python",
     ),
-    container_image=TASK_IMAGE,
     environment=build_task_environment(),
     retries=TASK_RETRIES,
     limits=TASK_LIMITS,

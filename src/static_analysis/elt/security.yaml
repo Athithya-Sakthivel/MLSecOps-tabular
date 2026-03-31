@@ -1,0 +1,142 @@
+# Security rules for the ELT pipeline.
+# Goal:
+#   Catch unsafe SQL construction, accidental secret disclosure, and env-driven outbound
+#   network calls before they reach production.
+#
+# Scope:
+#   Only Python files under the ELT workflow tree. These rules are intentionally narrow
+#   so they can be enforced in CI without becoming noisy across unrelated code.
+
+rules:
+  # 1) Dynamic SQL in Spark.
+  #
+  # Why this is required:
+  #   - This codebase builds Spark SQL strings in helper methods.
+  #   - If any part of those strings becomes externally influenced, you get an injection
+  #     or query-shaping risk.
+  #   - Even when the current call sites are internal, this rule prevents future regressions
+  #     where a developer starts interpolating runtime values into SQL.
+  - id: elt.security.dynamic-spark-sql-interpolation
+    message: >
+      Spark SQL is being built with interpolation, formatting, or concatenation. Keep
+      the SQL text static and whitelist identifiers before assembling the query.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      technology: ["python", "pyspark", "flyte", "iceberg"]
+      confidence: high
+      impact: high
+      cwe: "CWE-89"
+      tags:
+        - sql-injection
+        - dynamic-sql
+        - spark
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    patterns:
+      - pattern-either:
+          # Direct f-string interpolation in Spark SQL call.
+          - pattern: $SESSION.sql(f"...{...}...")
+          # String formatting through .format() is still dynamic SQL construction.
+          - pattern: $SESSION.sql("...".format(...))
+          # Concatenation is also unsafe because it allows query text to be assembled at runtime.
+          - pattern: $SESSION.sql("..." + ...)
+          # %-formatting is less common, but still a dynamic SQL construction path.
+          - pattern: $SESSION.sql("..." % ...)
+
+  # 2) Secret leakage into logs.
+  #
+  # Why this is required:
+  #   - The pipeline reads AWS credentials, session tokens, and Hugging Face tokens from
+  #     the environment.
+  #   - Logging those values directly would leak credentials into task logs, Flyte metadata,
+  #     or centralized observability systems.
+  #   - This is a high-severity pattern even when the leak is accidental.
+  #
+  # Notes:
+  #   - This is a taint rule so the source can flow through variables before it reaches a
+  #     logging sink.
+  #   - The sinks are the places where credentials become visible outside the process.
+  - id: elt.security.secret-value-in-logs
+    message: >
+      A secret or token derived from environment configuration is flowing into logs. Do
+      not log access keys, session tokens, or other credential material.
+    severity: ERROR
+    mode: taint
+    languages: [python]
+    metadata:
+      category: security
+      technology: ["python", "flyte"]
+      confidence: high
+      impact: high
+      cwe: "CWE-532"
+      tags:
+        - secrets
+        - logging
+        - credential-leak
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    pattern-sources:
+      # AWS credential material.
+      - pattern: os.environ.get("AWS_ACCESS_KEY_ID", ...)
+      - pattern: os.getenv("AWS_ACCESS_KEY_ID", ...)
+      - pattern: os.environ.get("AWS_SECRET_ACCESS_KEY", ...)
+      - pattern: os.getenv("AWS_SECRET_ACCESS_KEY", ...)
+      - pattern: os.environ.get("AWS_SESSION_TOKEN", ...)
+      - pattern: os.getenv("AWS_SESSION_TOKEN", ...)
+      # Token material used for model/data downloads.
+      - pattern: os.environ.get("HF_TOKEN", ...)
+      - pattern: os.getenv("HF_TOKEN", ...)
+      - pattern: os.environ.get("HUGGINGFACE_HUB_TOKEN", ...)
+      - pattern: os.getenv("HUGGINGFACE_HUB_TOKEN", ...)
+    pattern-sinks:
+      # Structured logs.
+      - pattern: log_json(...)
+      # Standard logger methods used in this repo.
+      - pattern: LOG.info(...)
+      - pattern: LOG.warning(...)
+      - pattern: LOG.error(...)
+      # Generic fallback for ad hoc debug prints.
+      - pattern: print(...)
+
+  # 3) Env-driven outbound URL use.
+  #
+  # Why this is required:
+  #   - The code probes an HTTP REST endpoint for Iceberg.
+  #   - If a future change makes that URL user-influenced or less constrained, it becomes
+  #     an SSRF-style outbound request risk.
+  #   - This rule is intentionally a warning, because the current code uses a config
+  #     endpoint, but the pattern should still be guarded.
+  - id: elt.security.env-controlled-url-open
+    message: >
+      A network request is being made with an environment-controlled URL. Validate and
+      whitelist the endpoint before using it in urllib request objects or urlopen calls.
+    severity: WARNING
+    mode: taint
+    languages: [python]
+    metadata:
+      category: security
+      technology: ["python"]
+      confidence: medium
+      impact: medium
+      cwe: "CWE-918"
+      tags:
+        - ssrf
+        - url
+        - urllib
+        - configuration
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+    pattern-sources:
+      - pattern: os.environ.get("ICEBERG_REST_URI", ...)
+      - pattern: os.getenv("ICEBERG_REST_URI", ...)
+    pattern-sinks:
+      # The Request constructor matters because it can be the first network-facing
+      # boundary when a URL is assembled from configuration.
+      - pattern: urllib.request.Request(...)
+      # The actual outbound fetch is also a sink.
+      - pattern: urllib.request.urlopen(...)
