@@ -58,6 +58,8 @@ test-iac-staging:
 	bash src/terraform/run.sh --create --env staging || true && \
 	bash src/terraform/run.sh --delete --yes-delete --env staging
 
+sync:
+	aws s3 sync s3://$$S3_BUCKET/iceberg/warehouse/ $(pwd)/data/iceberg/
 
 
 
