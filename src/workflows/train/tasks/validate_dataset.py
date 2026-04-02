@@ -1,3 +1,4 @@
+# src/workflows/train/tasks/validate_dataset.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -41,14 +42,15 @@ def validate_dataset(
 ) -> FlyteFile:
     """
     Validate the Gold dataset against the frozen ML contract, then emit a canonical,
-    timestamp-ordered parquet snapshot and a validation sidecar.
+    timestamp-ordered parquet snapshot and validation sidecars.
     """
     if not 0.0 < validation_fraction < 1.0:
-        raise ValueError(
-            f"validation_fraction must be strictly between 0 and 1, got {validation_fraction}"
-        )
+        raise ValueError(f"validation_fraction must be strictly between 0 and 1, got {validation_fraction}")
 
     dataset_uri = str(gold_dataset)
+    if not dataset_uri.strip():
+        raise ValueError("gold_dataset resolved to an empty path")
+
     log_json(
         msg="validate_dataset_start",
         gold_dataset=dataset_uri,
@@ -57,6 +59,9 @@ def validate_dataset(
     )
 
     raw_df = load_gold_frame(dataset_uri)
+    if raw_df.empty:
+        raise ValueError("Gold dataset is empty")
+
     validate_gold_contract(raw_df, strict_dtypes=False, label="Gold input frame")
 
     df = coerce_contract_dtypes(raw_df)
@@ -78,6 +83,7 @@ def validate_dataset(
 
     feature_spec = build_feature_spec()
     schema_hash = build_schema_hash(feature_spec)
+
     contract = build_contract_summary(
         dataset_uri=dataset_uri,
         row_count=len(validated_df),
