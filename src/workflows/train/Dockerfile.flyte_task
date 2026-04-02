@@ -45,6 +45,6 @@ COPY src /opt/app/src
 RUN useradd -m -u 10001 appuser
 USER appuser
 
-# Uses tini as PID 1 to forward signals and reap zombies, ensuring clean shutdown for Ray
+# Uses tini as PID 1 to forward signals and reap zombies, ensuring clean shutdown for Ray and flyte tasks
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

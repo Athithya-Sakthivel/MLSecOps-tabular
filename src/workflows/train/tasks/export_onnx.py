@@ -59,10 +59,25 @@ def export_onnx(
     from onnxmltools.convert.common.data_types import FloatTensorType
     from onnxmltools.convert.lightgbm import convert as convert_lightgbm
 
-    artifact_dir = Path(str(train_artifacts_dir))
-    manifest = read_json(artifact_dir / "manifest.json")
-    artifact_feature_spec = read_json(artifact_dir / "feature_spec.json")
-    artifact_contract = read_json_if_exists(artifact_dir / "contract.json") or manifest
+    artifact_dir = Path(train_artifacts_dir)
+    manifest_path = artifact_dir / "manifest.json"
+    feature_spec_path = artifact_dir / "feature_spec.json"
+    contract_path = artifact_dir / "contract.json"
+    sample_path = artifact_dir / "validation_sample.parquet"
+    booster_path = artifact_dir / "model.txt"
+
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing training manifest: {manifest_path}")
+    if not feature_spec_path.is_file():
+        raise FileNotFoundError(f"Missing feature spec artifact: {feature_spec_path}")
+    if not sample_path.is_file():
+        raise FileNotFoundError(f"Validation sample missing: {sample_path}")
+    if not booster_path.is_file():
+        raise FileNotFoundError(f"Missing LightGBM model artifact: {booster_path}")
+
+    manifest = read_json(manifest_path)
+    artifact_feature_spec = read_json(feature_spec_path)
+    artifact_contract = read_json_if_exists(contract_path) or manifest
 
     current_feature_spec = build_feature_spec()
     current_schema_hash = build_schema_hash(current_feature_spec)
@@ -76,17 +91,9 @@ def export_onnx(
     if list(manifest.get("categorical_features", [])) != CATEGORICAL_FEATURES:
         raise ValueError("Training categorical feature contract does not match the current Gold contract")
 
-    sample_path = artifact_dir / "validation_sample.parquet"
-    if not sample_path.exists():
-        raise FileNotFoundError(f"Validation sample missing: {sample_path}")
-
-    booster_path = artifact_dir / "model.txt"
-    if not booster_path.is_file():
-        raise FileNotFoundError(f"Missing LightGBM model artifact: {booster_path}")
-
     booster = Booster(model_file=str(booster_path))
-
     gold_uri = str(gold_dataset)
+
     log_json(
         msg="export_onnx_start",
         train_artifacts_dir=str(artifact_dir),
@@ -98,7 +105,7 @@ def export_onnx(
     )
 
     onnx_dir = Path(tempfile.mkdtemp(prefix="flyte_lgbm_onnx_"))
-    onnx_dir.mkdir(parents=True, exist_ok=True)
+    onnx_path = onnx_dir / "model.onnx"
 
     initial_types = [("input", FloatTensorType([None, len(FEATURE_COLUMNS)]))]
     onnx_model = convert_lightgbm(
@@ -108,7 +115,6 @@ def export_onnx(
         zipmap=False,
     )
 
-    onnx_path = onnx_dir / "model.onnx"
     with onnx_path.open("wb") as f:
         f.write(onnx_model.SerializeToString())
 
@@ -119,13 +125,25 @@ def export_onnx(
     validate_value_contracts(sample_df)
 
     booster_features = prepare_model_input_frame(sample_df)
-    onnx_features = align_model_features(sample_df).to_numpy(dtype=np.float32)
+    onnx_features = align_model_features(sample_df).to_numpy(dtype=np.float32, copy=False)
 
-    booster_pred = booster.predict(booster_features, num_iteration=booster.best_iteration or None)
+    best_iteration = getattr(booster, "best_iteration", None)
+    if isinstance(best_iteration, int) and best_iteration > 0:
+        booster_pred = booster.predict(booster_features, num_iteration=best_iteration)
+    else:
+        booster_pred = booster.predict(booster_features)
+
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
     onnx_pred = session.run(None, {input_name: onnx_features})[0]
-    onnx_pred = np.asarray(onnx_pred).reshape(-1)
+
+    booster_pred = np.asarray(booster_pred, dtype=np.float64).reshape(-1)
+    onnx_pred = np.asarray(onnx_pred, dtype=np.float64).reshape(-1)
+
+    if booster_pred.shape != onnx_pred.shape:
+        raise ValueError(
+            f"Prediction shape mismatch: booster={booster_pred.shape}, onnx={onnx_pred.shape}"
+        )
 
     parity_metrics = compute_regression_metrics(booster_pred, onnx_pred)
     parity_metrics.update(
@@ -139,6 +157,7 @@ def export_onnx(
             "gold_table": manifest.get("gold_table", ""),
             "source_silver_table": manifest.get("source_silver_table", SOURCE_SILVER_TABLE),
             "validation_sample_path": str(sample_path),
+            "onnx_path": str(onnx_path),
         }
     )
 

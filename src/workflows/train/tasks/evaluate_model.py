@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from flytekit import task
 from flytekit.types.directory import FlyteDirectory
@@ -33,8 +34,35 @@ from workflows.train.tasks.common import (
 
 EvaluationMetrics = dict[str, float]
 
-def _json_text(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+def _normalize_json_value(value: Any) -> Any:
+    """
+    Normalize JSON-ish inputs so comparisons are stable whether the source is:
+    - already parsed dict/list
+    - a JSON string
+    - None / empty string
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (dict, list, int, float, bool)):
+        return value
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return value
+
+    return value
+
+
+def _json_text(value: Any) -> str:
+    normalized = _normalize_json_value(value)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 @task(
@@ -60,8 +88,19 @@ def evaluate_model(
     from lightgbm import Booster
 
     artifact_dir = Path(str(train_artifacts_dir))
-    manifest = read_json(artifact_dir / "manifest.json")
-    artifact_feature_spec = read_json(artifact_dir / "feature_spec.json")
+    manifest_path = artifact_dir / "manifest.json"
+    feature_spec_path = artifact_dir / "feature_spec.json"
+    booster_path = artifact_dir / "model.txt"
+
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Missing training manifest: {manifest_path}")
+    if not feature_spec_path.is_file():
+        raise FileNotFoundError(f"Missing training feature spec: {feature_spec_path}")
+    if not booster_path.is_file():
+        raise FileNotFoundError(f"Missing LightGBM model artifact: {booster_path}")
+
+    manifest = read_json(manifest_path)
+    artifact_feature_spec = read_json(feature_spec_path)
     artifact_contract = read_json_if_exists(artifact_dir / "contract.json") or manifest
 
     current_feature_spec = build_feature_spec()
@@ -105,10 +144,6 @@ def evaluate_model(
         feature_version=current_feature_spec["feature_version"],
         schema_version=current_feature_spec["schema_version"],
     )
-
-    booster_path = artifact_dir / "model.txt"
-    if not booster_path.is_file():
-        raise FileNotFoundError(f"Missing LightGBM model artifact: {booster_path}")
 
     booster = Booster(model_file=str(booster_path))
 

@@ -28,6 +28,32 @@ from workflows.train.tasks.common import (
 )
 
 
+def _stable_sort_dataframe(df):
+    """
+    Deterministically sort the dataframe before writing parquet.
+
+    We sort by the configured timestamp column first, then by a small set of
+    common contract columns when they exist. This reduces nondeterminism across
+    repeated Flyte runs.
+    """
+    sort_columns = []
+
+    for candidate in (
+        TIMESTAMP_COLUMN,
+        "trip_id",
+        "as_of_date",
+        "feature_version",
+        "schema_version",
+    ):
+        if candidate in df.columns and candidate not in sort_columns:
+            sort_columns.append(candidate)
+
+    if not sort_columns:
+        return df.reset_index(drop=True)
+
+    return df.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
+
+
 @task(
     cache=False,
     environment=build_task_environment(),
@@ -48,14 +74,15 @@ def load_gold(dataset_uri: str, output_path: str = "/tmp/gold_canonical.parquet"
     validate_gold_contract(df, strict_dtypes=True, label="Gold canonical frame")
     validate_value_contracts(df)
 
-    df = df.sort_values(TIMESTAMP_COLUMN, kind="mergesort").reset_index(drop=True)
+    df = _stable_sort_dataframe(df)
 
-    out_path = Path(output_path)
+    out_path = Path(output_path).expanduser()
     ensure_directory(out_path.parent)
     df.to_parquet(out_path, index=False)
 
     feature_spec = build_feature_spec()
     schema_hash = build_schema_hash(feature_spec)
+
     contract = build_contract_summary(
         dataset_uri=dataset_uri,
         row_count=len(df),
@@ -68,6 +95,7 @@ def load_gold(dataset_uri: str, output_path: str = "/tmp/gold_canonical.parquet"
             "validated_columns": list(df.columns),
             "gold_feature_version": GOLD_FEATURE_VERSION,
             "gold_schema_version": GOLD_SCHEMA_VERSION,
+            "schema_hash": schema_hash,
         },
     )
 

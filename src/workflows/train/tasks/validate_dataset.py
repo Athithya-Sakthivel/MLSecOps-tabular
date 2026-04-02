@@ -43,6 +43,11 @@ def validate_dataset(
     Validate the Gold dataset against the frozen ML contract, then emit a canonical,
     timestamp-ordered parquet snapshot and a validation sidecar.
     """
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError(
+            f"validation_fraction must be strictly between 0 and 1, got {validation_fraction}"
+        )
+
     dataset_uri = str(gold_dataset)
     log_json(
         msg="validate_dataset_start",
@@ -57,6 +62,9 @@ def validate_dataset(
     df = coerce_contract_dtypes(raw_df)
     validate_gold_contract(df, strict_dtypes=True, label="Gold canonical frame")
     validate_value_contracts(df)
+
+    if TIMESTAMP_COLUMN not in df.columns:
+        raise ValueError(f"Missing required timestamp column: {TIMESTAMP_COLUMN}")
 
     split = split_by_time(df, validation_fraction=validation_fraction)
     if split.train_df.empty or split.valid_df.empty:

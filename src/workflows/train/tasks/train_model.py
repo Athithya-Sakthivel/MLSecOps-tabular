@@ -4,7 +4,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pandas as pd
 from flytekit import Resources, task
@@ -71,37 +71,7 @@ def _env_str(name: str, default: str) -> str:
     return os.environ.get(name, default).strip()
 
 
-if TRAIN_PROFILE == "prod":
-    TASK_LIMITS = Resources(
-        cpu=_env_str("TRAIN_TASK_CPU", "1000m"),
-        mem=_env_str("TRAIN_TASK_MEM", "1024Mi"),
-    )
-    RAY_NUM_WORKERS = _env_int("RAY_NUM_WORKERS", 4, minimum=1)
-    RAY_WORKER_CPU = _env_int("RAY_WORKER_CPU", 2, minimum=1)
-    RAY_WORKER_MEM = _env_str("RAY_WORKER_MEM", "4Gi")
-    FLAML_TIME_BUDGET_SECONDS = _env_int("FLAML_TIME_BUDGET_SECONDS", 900, minimum=60)
-    FLAML_MAX_ITER = _env_int("FLAML_MAX_ITER", 100, minimum=10)
-    SAMPLE_ROWS = _env_int("SAMPLE_ROWS", 100_000, minimum=100)
-    NUM_BOOST_ROUND = _env_int("NUM_BOOST_ROUND", 3000, minimum=100)
-    EARLY_STOPPING_ROUNDS = _env_int("EARLY_STOPPING_ROUNDS", 200, minimum=10)
-    TASK_RETRIES = _env_int("TRAIN_TASK_RETRIES", 1, minimum=0)
-else:
-    TASK_LIMITS = Resources(
-        cpu=_env_str("TRAIN_TASK_CPU", "500m"),
-        mem=_env_str("TRAIN_TASK_MEM", "768Mi"),
-    )
-    RAY_NUM_WORKERS = _env_int("RAY_NUM_WORKERS", 2, minimum=1)
-    RAY_WORKER_CPU = _env_int("RAY_WORKER_CPU", 1, minimum=1)
-    RAY_WORKER_MEM = _env_str("RAY_WORKER_MEM", "2Gi")
-    FLAML_TIME_BUDGET_SECONDS = _env_int("FLAML_TIME_BUDGET_SECONDS", 120, minimum=30)
-    FLAML_MAX_ITER = _env_int("FLAML_MAX_ITER", 20, minimum=5)
-    SAMPLE_ROWS = _env_int("SAMPLE_ROWS", 25_000, minimum=100)
-    NUM_BOOST_ROUND = _env_int("NUM_BOOST_ROUND", 1500, minimum=100)
-    EARLY_STOPPING_ROUNDS = _env_int("EARLY_STOPPING_ROUNDS", 100, minimum=10)
-    TASK_RETRIES = _env_int("TRAIN_TASK_RETRIES", 1, minimum=0)
-
-
-def _normalize_lgb_params(params) -> dict[str, LightGBMParam]:
+def _normalize_lgb_params(params: dict[str, Any]) -> dict[str, LightGBMParam]:
     normalized: dict[str, LightGBMParam] = {}
     for key, value in params.items():
         if isinstance(value, (str, int, float, bool)):
@@ -113,6 +83,44 @@ def _normalize_lgb_params(params) -> dict[str, LightGBMParam]:
         else:
             normalized[str(key)] = str(value)
     return normalized
+
+
+def _resolve_boost_rounds(params: dict[str, Any], default_rounds: int) -> int:
+    for key in ("n_estimators", "num_iterations", "num_boost_round", "num_rounds"):
+        value = params.get(key)
+        if value is not None:
+            try:
+                rounds = int(value)
+                if rounds > 0:
+                    return rounds
+            except (TypeError, ValueError):
+                continue
+    return max(1, int(default_rounds))
+
+
+def _require_columns(frame: pd.DataFrame, required_columns: list[str], *, label: str) -> None:
+    missing = [col for col in required_columns if col not in frame.columns]
+    if missing:
+        raise ValueError(f"{label} is missing required columns: {missing}")
+
+
+def _coerce_worker_frame(
+    frame: pd.DataFrame,
+    *,
+    feature_columns: list[str],
+    categorical_features: list[str],
+    label_column: str,
+) -> pd.DataFrame:
+    coerced = frame.copy()
+
+    for col in categorical_features:
+        coerced[col] = pd.to_numeric(coerced[col], errors="raise").astype("int32").astype("category")
+
+    for col in [c for c in feature_columns if c not in categorical_features]:
+        coerced[col] = pd.to_numeric(coerced[col], errors="raise").astype("float64")
+
+    coerced[label_column] = pd.to_numeric(coerced[label_column], errors="raise").astype("float64")
+    return coerced
 
 
 def _worker_train_loop(config: TrainLoopConfig) -> None:
@@ -128,19 +136,28 @@ def _worker_train_loop(config: TrainLoopConfig) -> None:
     train_df = train_shard.materialize().to_pandas()
     valid_df = valid_shard.materialize().to_pandas()
 
-    feature_columns = config["feature_columns"]
-    categorical_features = config["categorical_features"]
+    feature_columns = list(config["feature_columns"])
+    categorical_features = list(config["categorical_features"])
     label_column = config["label_column"]
     num_boost_round = int(config["num_boost_round"])
     early_stopping_rounds = int(config["early_stopping_rounds"])
     params = dict(config["params"])
 
-    for frame in (train_df, valid_df):
-        for col in categorical_features:
-            frame[col] = pd.to_numeric(frame[col], errors="raise").astype("int32").astype("category")
-        for col in [c for c in feature_columns if c not in categorical_features]:
-            frame[col] = pd.to_numeric(frame[col], errors="raise").astype("float64")
-        frame[label_column] = pd.to_numeric(frame[label_column], errors="raise").astype("float64")
+    _require_columns(train_df, [*feature_columns, label_column], label="train shard")
+    _require_columns(valid_df, [*feature_columns, label_column], label="validation shard")
+
+    train_df = _coerce_worker_frame(
+        train_df,
+        feature_columns=feature_columns,
+        categorical_features=categorical_features,
+        label_column=label_column,
+    )
+    valid_df = _coerce_worker_frame(
+        valid_df,
+        feature_columns=feature_columns,
+        categorical_features=categorical_features,
+        label_column=label_column,
+    )
 
     train_set = lgb.Dataset(
         train_df[feature_columns],
@@ -180,6 +197,36 @@ def _worker_train_loop(config: TrainLoopConfig) -> None:
             lgb.early_stopping(early_stopping_rounds, verbose=False),
         ],
     )
+
+
+if TRAIN_PROFILE == "prod":
+    TASK_LIMITS = Resources(
+        cpu=_env_str("TRAIN_TASK_CPU", "1000m"),
+        mem=_env_str("TRAIN_TASK_MEM", "1024Mi"),
+    )
+    RAY_NUM_WORKERS = _env_int("RAY_NUM_WORKERS", 4, minimum=1)
+    RAY_WORKER_CPU = _env_int("RAY_WORKER_CPU", 2, minimum=1)
+    RAY_WORKER_MEM = _env_str("RAY_WORKER_MEM", "4Gi")
+    FLAML_TIME_BUDGET_SECONDS = _env_int("FLAML_TIME_BUDGET_SECONDS", 900, minimum=60)
+    FLAML_MAX_ITER = _env_int("FLAML_MAX_ITER", 100, minimum=10)
+    SAMPLE_ROWS = _env_int("SAMPLE_ROWS", 100_000, minimum=100)
+    NUM_BOOST_ROUND = _env_int("NUM_BOOST_ROUND", 3000, minimum=100)
+    EARLY_STOPPING_ROUNDS = _env_int("EARLY_STOPPING_ROUNDS", 200, minimum=10)
+    TASK_RETRIES = _env_int("TRAIN_TASK_RETRIES", 1, minimum=0)
+else:
+    TASK_LIMITS = Resources(
+        cpu=_env_str("TRAIN_TASK_CPU", "500m"),
+        mem=_env_str("TRAIN_TASK_MEM", "768Mi"),
+    )
+    RAY_NUM_WORKERS = _env_int("RAY_NUM_WORKERS", 2, minimum=1)
+    RAY_WORKER_CPU = _env_int("RAY_WORKER_CPU", 1, minimum=1)
+    RAY_WORKER_MEM = _env_str("RAY_WORKER_MEM", "2Gi")
+    FLAML_TIME_BUDGET_SECONDS = _env_int("FLAML_TIME_BUDGET_SECONDS", 120, minimum=30)
+    FLAML_MAX_ITER = _env_int("FLAML_MAX_ITER", 20, minimum=5)
+    SAMPLE_ROWS = _env_int("SAMPLE_ROWS", 25_000, minimum=100)
+    NUM_BOOST_ROUND = _env_int("NUM_BOOST_ROUND", 1500, minimum=100)
+    EARLY_STOPPING_ROUNDS = _env_int("EARLY_STOPPING_ROUNDS", 100, minimum=10)
+    TASK_RETRIES = _env_int("TRAIN_TASK_RETRIES", 1, minimum=0)
 
 
 @task(
@@ -246,6 +293,7 @@ def train_model(
 
     current_feature_spec = build_feature_spec()
     current_schema_hash = build_schema_hash(current_feature_spec)
+
     expected_feature_spec_path = artifact_sidecar_path(dataset_uri, ".feature_spec.json")
     expected_contract_path = artifact_sidecar_path(dataset_uri, ".contract.json")
 
@@ -254,15 +302,20 @@ def train_model(
         raise ValueError("Gold feature_spec sidecar does not match the current training contract")
 
     current_dataset_contract = read_json_if_exists(expected_contract_path)
-    if current_dataset_contract is not None and current_dataset_contract.get("schema_hash") not in {None, current_schema_hash}:
-        raise ValueError("Gold contract sidecar schema hash does not match the current training contract")
+    if isinstance(current_dataset_contract, dict):
+        contract_schema_hash = current_dataset_contract.get("schema_hash")
+        if contract_schema_hash not in {None, current_schema_hash}:
+            raise ValueError("Gold contract sidecar schema hash does not match the current training contract")
 
     raw_df = load_gold_frame(dataset_uri)
+    _require_columns(raw_df, [*FEATURE_COLUMNS, LABEL_COLUMN, TIMESTAMP_COLUMN], label="Gold input frame")
     validate_gold_contract(raw_df, strict_dtypes=False, label="Gold input frame")
 
     df = coerce_contract_dtypes(raw_df)
+    _require_columns(df, [*FEATURE_COLUMNS, LABEL_COLUMN, TIMESTAMP_COLUMN], label="Gold canonical frame")
     validate_gold_contract(df, strict_dtypes=True, label="Gold canonical frame")
     validate_value_contracts(df)
+
     df = df.sort_values(TIMESTAMP_COLUMN, kind="mergesort").reset_index(drop=True)
 
     split = split_by_time(df, validation_fraction=validation_fraction)
@@ -270,6 +323,7 @@ def train_model(
         raise ValueError("Insufficient rows after chronological split for reliable training")
 
     search_df = sample_frame(split.train_df, max_rows=sample_rows, seed=random_seed)
+    _require_columns(search_df, [*FEATURE_COLUMNS, LABEL_COLUMN], label="sampled train frame")
     X_search = prepare_model_input_frame(search_df)
     y_search = search_df[LABEL_COLUMN].astype("float64")
 
@@ -288,14 +342,16 @@ def train_model(
         model_history=False,
     )
 
-    best_config = dict(automl.best_config)
-    safe_best_config = {k: v for k, v in best_config.items() if not str(k).startswith("FLAML_")}
+    best_config = dict(automl.best_config or {})
+    safe_best_config = {
+        k: v for k, v in best_config.items() if not str(k).startswith("FLAML_")
+    }
     flaml_estimator = LGBMEstimator(task="regression", **safe_best_config)
     worker_params = _normalize_lgb_params(flaml_estimator.params)
 
-    boost_rounds = int(worker_params.pop("n_estimators", num_boost_round) or num_boost_round)
-    if boost_rounds <= 0:
-        boost_rounds = num_boost_round
+    boost_rounds = _resolve_boost_rounds(worker_params, num_boost_round)
+    for key in ("n_estimators", "num_iterations", "num_boost_round", "num_rounds"):
+        worker_params.pop(key, None)
 
     worker_params.setdefault("objective", "regression")
     worker_params.setdefault("verbosity", -1)
@@ -359,7 +415,10 @@ def train_model(
 
     booster.save_model(str(out_dir / "model.txt"))
 
-    parity_sample = split.valid_df.sample(n=min(2048, len(split.valid_df)), random_state=random_seed).copy()
+    parity_sample = split.valid_df.sample(
+        n=min(2048, len(split.valid_df)),
+        random_state=random_seed,
+    ).copy()
     parity_sample = parity_sample.sort_values(TIMESTAMP_COLUMN, kind="mergesort").reset_index(drop=True)
     parity_sample.to_parquet(out_dir / "validation_sample.parquet", index=False)
 

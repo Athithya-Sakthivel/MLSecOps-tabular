@@ -1,7 +1,9 @@
 # src/workflows/train/tasks/register_model.py
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from flytekit import task
 from flytekit.types.directory import FlyteDirectory
@@ -16,8 +18,52 @@ from workflows.train.tasks.common import (
     build_task_environment,
     log_json,
     read_json,
-    read_json_if_exists,
 )
+
+
+def _materialize_directory(directory: FlyteDirectory, *, label: str) -> Path:
+    """
+    Download a FlyteDirectory input into a local filesystem path.
+    """
+    local_path = Path(directory.download())
+    if not local_path.exists():
+        raise FileNotFoundError(f"{label} directory does not exist after download: {local_path}")
+    if not local_path.is_dir():
+        raise NotADirectoryError(f"{label} is not a directory: {local_path}")
+    return local_path
+
+
+def _require_file(path: Path, *, label: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing required {label}: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Expected a file for {label}, found something else: {path}")
+
+
+def _scalar_params(values: Mapping[str, Any]) -> dict[str, str]:
+    """
+    MLflow params are logged as strings; keep only scalar values.
+    """
+    out: dict[str, str] = {}
+    for key, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            out[key] = str(value)
+    return out
+
+
+def _scalar_metrics(values: Mapping[str, Any]) -> dict[str, float]:
+    """
+    MLflow metrics must be numeric.
+    """
+    out: dict[str, float] = {}
+    for key, value in values.items():
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            out[key] = float(value)
+    return out
 
 
 @task(
@@ -29,16 +75,16 @@ from workflows.train.tasks.common import (
 def register_model(
     train_artifacts_dir: FlyteDirectory,
     onnx_artifacts_dir: FlyteDirectory,
-    evaluation_metrics: dict[str, float],
+    evaluation_metrics: Mapping[str, float],
     mlflow_experiment_name: str = DEFAULT_MLFLOW_EXPERIMENT,
 ) -> None:
     """
-    Log the model, contracts, and parity artifacts to MLflow as the final registry step.
+    Register the training run artifacts, contract files, and ONNX parity outputs in MLflow.
     """
     import mlflow
 
-    train_dir = Path(str(train_artifacts_dir))
-    onnx_dir = Path(str(onnx_artifacts_dir))
+    train_dir = _materialize_directory(train_artifacts_dir, label="train_artifacts_dir")
+    onnx_dir = _materialize_directory(onnx_artifacts_dir, label="onnx_artifacts_dir")
 
     manifest_path = train_dir / "manifest.json"
     feature_spec_path = train_dir / "feature_spec.json"
@@ -53,9 +99,22 @@ def register_model(
     onnx_manifest_path = onnx_dir / "onnx_manifest.json"
     onnx_parity_path = onnx_dir / "onnx_parity.json"
 
+    for file_path, label in [
+        (manifest_path, "manifest.json"),
+        (feature_spec_path, "feature_spec.json"),
+        (contract_path, "contract.json"),
+        (best_config_path, "best_config.json"),
+        (lightgbm_params_path, "lightgbm_params.json"),
+        (metrics_path, "metrics.json"),
+        (onnx_path, "model.onnx"),
+        (onnx_manifest_path, "onnx_manifest.json"),
+        (onnx_parity_path, "onnx_parity.json"),
+    ]:
+        _require_file(file_path, label=label)
+
     manifest = read_json(manifest_path)
     feature_spec = read_json(feature_spec_path)
-    contract = read_json_if_exists(contract_path) or manifest
+    contract = read_json(contract_path)
     best_config = read_json(best_config_path)
     train_metrics = read_json(metrics_path)
     onnx_parity = read_json(onnx_parity_path)
@@ -77,6 +136,7 @@ def register_model(
         raise ValueError("Training feature version does not match the current Gold contract")
 
     mlflow.set_experiment(mlflow_experiment_name)
+
     with mlflow.start_run():
         mlflow.set_tags(
             {
@@ -100,26 +160,27 @@ def register_model(
             }
         )
 
-        mlflow.log_params({f"flaml__{k}": v for k, v in best_config.items()})
+        mlflow.log_params(_scalar_params(best_config))
         mlflow.log_params(
-            {
-                f"manifest__{k}": v
-                for k, v in manifest.items()
-                if isinstance(v, (str, int, float, bool))
-            }
+            _scalar_params(
+                {
+                    f"manifest__{k}": v
+                    for k, v in manifest.items()
+                }
+            )
         )
 
-        mlflow.log_metrics({f"train__{k}": float(v) for k, v in train_metrics.items() if isinstance(v, (int, float))})
-        mlflow.log_metrics({f"eval__{k}": float(v) for k, v in evaluation_metrics.items()})
-        mlflow.log_metrics({f"onnx_parity__{k}": float(v) for k, v in onnx_parity.items() if isinstance(v, (int, float))})
+        mlflow.log_metrics(_scalar_metrics(train_metrics))
+        mlflow.log_metrics(_scalar_metrics(evaluation_metrics))
+        mlflow.log_metrics(_scalar_metrics(onnx_parity))
 
         mlflow.log_artifact(str(manifest_path), artifact_path="model")
         mlflow.log_artifact(str(feature_spec_path), artifact_path="model")
-        if contract_path.exists():
-            mlflow.log_artifact(str(contract_path), artifact_path="model")
+        mlflow.log_artifact(str(contract_path), artifact_path="model")
         mlflow.log_artifact(str(best_config_path), artifact_path="model")
         mlflow.log_artifact(str(lightgbm_params_path), artifact_path="model")
         mlflow.log_artifact(str(metrics_path), artifact_path="model")
+
         if runtime_config_path.exists():
             mlflow.log_artifact(str(runtime_config_path), artifact_path="model")
         if validation_sample_path.exists():

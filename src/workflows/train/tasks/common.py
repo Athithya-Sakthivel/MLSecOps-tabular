@@ -303,43 +303,72 @@ def _read_parquet_frame(
     *,
     columns: list[str] | None,
 ) -> pd.DataFrame:
-    table = pq.read_table(
-        path,
-        filesystem=filesystem,
-        columns=columns,
-        use_threads=True,
-        pre_buffer=True,
-        use_pandas_metadata=True,
-    )
+    """
+    Read a single physical parquet file, not a dataset path.
+
+    This deliberately avoids dataset-style discovery/merging so partitioned
+    directory metadata does not collide with the physical file schema.
+    """
+    parquet_file = pq.ParquetFile(path, filesystem=filesystem)
+    table = parquet_file.read(columns=columns, use_threads=True)
     return table.to_pandas()
+
+
+def _normalize_as_of_date_column(df: pd.DataFrame) -> pd.DataFrame:
+    if "as_of_date" not in df.columns:
+        return df
+    out = df.copy()
+    out["as_of_date"] = pd.to_datetime(out["as_of_date"], errors="raise").dt.date
+    return out
 
 
 def load_gold_frame(dataset_uri: str, columns: list[str] | None = None) -> pd.DataFrame:
     """
-    Read the Gold dataset from a directory or file URI using explicit Arrow filesystem
-    discovery. This avoids implicit dataset crawling and schema inference across mixed
-    partitions, which is the failure mode that caused schema merge errors.
-    """
-    filesystem, base_path = _filesystem_and_path(dataset_uri)
-    parquet_files = _discover_parquet_files(filesystem, base_path)
+    Robust parquet loader for the gold training matrix.
 
-    if not parquet_files:
-        raise FileNotFoundError(f"no parquet files found under {dataset_uri!r}")
+    Behavior:
+    - resolves the storage URI explicitly
+    - discovers only physical .parquet files
+    - reads each file independently through ParquetFile.read()
+    - normalizes as_of_date only after the per-file read
+    - concatenates frames only after each file is safely loaded
+
+    This avoids schema-merge failures that happen when a partitioned dataset
+    exposes the same logical column through both file metadata and partition
+    directory metadata.
+    """
+    log_json(msg="load_gold_start", dataset_uri=str(dataset_uri), output_path="/tmp/gold_canonical.parquet")
+
+    filesystem, base_path = _filesystem_and_path(dataset_uri)
+    files = _discover_parquet_files(filesystem, base_path)
+
+    if not files:
+        raise RuntimeError(f"No parquet files found at {dataset_uri}")
+
+    log_json(msg="load_gold_files_discovered", dataset_uri=str(dataset_uri), file_count=len(files))
 
     frames: list[pd.DataFrame] = []
-    for file_path in parquet_files:
-        frame = _read_parquet_frame(filesystem, file_path, columns=columns)
-        frames.append(frame)
+    for file_path in files:
+        try:
+            log_json(msg="load_gold_file_start", file=file_path)
+            frame = _read_parquet_frame(filesystem, file_path, columns=columns)
+            frame = _normalize_as_of_date_column(frame)
+            frames.append(frame)
+            log_json(msg="load_gold_file_complete", file=file_path, rows=len(frame), cols=len(frame.columns))
+        except Exception as exc:
+            log_json(msg="load_gold_file_failed", file=file_path, error=str(exc))
+            raise
 
-    if len(frames) == 1:
-        out = frames[0].copy()
-    else:
-        out = pd.concat(frames, ignore_index=True, copy=False)
+    final_df = pd.concat(frames, ignore_index=True, sort=False)
+    final_df = _normalize_as_of_date_column(final_df)
 
-    if "as_of_date" in out.columns:
-        out["as_of_date"] = pd.to_datetime(out["as_of_date"], errors="raise").dt.date
-
-    return out
+    log_json(
+        msg="load_gold_complete",
+        rows=len(final_df),
+        cols=len(final_df.columns),
+        dataset_uri=str(dataset_uri),
+    )
+    return final_df
 
 
 def validate_required_columns(df: pd.DataFrame, required_columns: Iterable[str] = REQUIRED_COLUMNS) -> None:
