@@ -303,9 +303,6 @@ def _read_parquet_frame(
     *,
     columns: list[str] | None,
 ) -> pd.DataFrame:
-    """
-    Read one physical parquet file.
-    """
     parquet_file = pq.ParquetFile(path, filesystem=filesystem)
     table = parquet_file.read(columns=columns, use_threads=True)
     return table.to_pandas()
@@ -320,9 +317,6 @@ def _normalize_as_of_date_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_utc_timestamp_series(series: pd.Series) -> pd.Series:
-    """
-    Force pandas to represent timestamps as UTC-aware nanosecond precision.
-    """
     ts = pd.to_datetime(series, utc=True, errors="raise")
     return ts.astype("datetime64[ns, UTC]")
 
