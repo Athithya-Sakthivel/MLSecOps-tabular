@@ -189,6 +189,8 @@ spec:
     metadata:
       labels:
         app: ${DEPLOYMENT_NAME}
+      annotations:
+        ${ANNOTATION_KEY}: "pending"
     spec:
       serviceAccountName: ${SERVICE_ACCOUNT_NAME}
       terminationGracePeriodSeconds: 30
@@ -323,7 +325,7 @@ apply_manifests() {
 
   existing="$(
     kubectl -n "${TARGET_NS}" get deployment "${DEPLOYMENT_NAME}" \
-      -o "jsonpath={.metadata.annotations['${ANNOTATION_KEY}']}" 2>/dev/null || true
+      -o "jsonpath={.spec.template.metadata.annotations['${ANNOTATION_KEY}']}" 2>/dev/null || true
   )"
 
   if [[ "${existing}" == "${hash}" ]]; then
@@ -336,9 +338,9 @@ apply_manifests() {
   kubectl -n "${TARGET_NS}" apply -f "${MANIFEST_DIR}/service.yaml" >/dev/null
 
   kubectl -n "${TARGET_NS}" patch deployment "${DEPLOYMENT_NAME}" --type=merge \
-    -p "{\"metadata\":{\"annotations\":{\"${ANNOTATION_KEY}\":\"${hash}\"}}}" >/dev/null
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"${ANNOTATION_KEY}\":\"${hash}\"}}}}}" >/dev/null
 
-  log "applied manifests and wrote annotation ${ANNOTATION_KEY}=${hash}"
+  log "applied manifests and wrote template annotation ${ANNOTATION_KEY}=${hash}"
 }
 
 # --- Diagnostics --------------------------------------------------------------
@@ -370,9 +372,9 @@ on_err() {
 }
 
 wait_for_deployment_ready() {
-  log "waiting for deployment readiness (timeout=${READY_TIMEOUT}s)"
-  kubectl -n "${TARGET_NS}" rollout status deployment/"${DEPLOYMENT_NAME}" --timeout="${READY_TIMEOUT}s" >/dev/null \
-    || fatal "timeout waiting for deployment readiness"
+  log "waiting for deployment availability (timeout=${READY_TIMEOUT}s)"
+  kubectl -n "${TARGET_NS}" wait --for=condition=Available deployment/"${DEPLOYMENT_NAME}" --timeout="${READY_TIMEOUT}s" >/dev/null \
+    || fatal "timeout waiting for deployment availability"
   log "deployment ready"
 }
 

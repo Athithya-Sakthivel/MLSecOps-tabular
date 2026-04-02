@@ -3,7 +3,7 @@ lc:
 	K8S_CLUSTER=kind bash src/infra/core/default_storage_class.sh && \
 	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh --rollout && \
 	bash src/infra/elt/iceberg.sh --rollout && bash src/infra/elt/spark_operator.sh --rollout && \
-	python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/ELT/commands.sh && sleep 500 && kubectl get pods -A
+	python3 src/infra/core/flyte_setup.py --rollout 
 
 set-sa:
 	bash src/core/default_storage_class.sh

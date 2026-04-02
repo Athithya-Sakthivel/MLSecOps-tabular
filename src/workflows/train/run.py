@@ -49,8 +49,7 @@ TRAIN_SERVICE_ACCOUNT = os.environ.get("TRAIN_SERVICE_ACCOUNT", "ray").strip() o
 
 TRAIN_TASK_IMAGE = os.environ.get(
     "TRAIN_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-train-task:2026-04-02-07-10--44f9de2@sha256:1b7d3e07343db1a2ed220af49c99575eac66d2542de782e140ada78fcdeb2b87",
-).strip()
+    "ghcr.io/athithya-sakthivel/flyte-train-task:2026-04-02-08-41--93024d4@sha256:533020f0fe9e25da359296d67308643de0cf4359d3ebb322f0f99dc59c0bdbe0").strip()
 if not TRAIN_TASK_IMAGE:
     raise RuntimeError(
         "TRAIN_TASK_IMAGE must not be empty. Set it to the container image that includes the train task runtime."
