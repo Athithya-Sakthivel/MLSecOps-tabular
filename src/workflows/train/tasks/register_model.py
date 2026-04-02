@@ -1,7 +1,5 @@
-# src/workflows/train/tasks/register_model.py
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +38,7 @@ def _require_file(path: Path, *, label: str) -> None:
         raise FileNotFoundError(f"Expected a file for {label}, found something else: {path}")
 
 
-def _scalar_params(values: Mapping[str, Any]) -> dict[str, str]:
+def _scalar_params(values: dict[str, Any]) -> dict[str, str]:
     """
     MLflow params are logged as strings; keep only scalar values.
     """
@@ -53,7 +51,7 @@ def _scalar_params(values: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
-def _scalar_metrics(values: Mapping[str, Any]) -> dict[str, float]:
+def _scalar_metrics(values: dict[str, Any]) -> dict[str, float]:
     """
     MLflow metrics must be numeric.
     """
@@ -75,7 +73,7 @@ def _scalar_metrics(values: Mapping[str, Any]) -> dict[str, float]:
 def register_model(
     train_artifacts_dir: FlyteDirectory,
     onnx_artifacts_dir: FlyteDirectory,
-    evaluation_metrics: Mapping[str, float],
+    evaluation_metrics: dict[str, float],
     mlflow_experiment_name: str = DEFAULT_MLFLOW_EXPERIMENT,
 ) -> None:
     """
@@ -162,12 +160,7 @@ def register_model(
 
         mlflow.log_params(_scalar_params(best_config))
         mlflow.log_params(
-            _scalar_params(
-                {
-                    f"manifest__{k}": v
-                    for k, v in manifest.items()
-                }
-            )
+            _scalar_params({f"manifest__{k}": v for k, v in manifest.items()})
         )
 
         mlflow.log_metrics(_scalar_metrics(train_metrics))

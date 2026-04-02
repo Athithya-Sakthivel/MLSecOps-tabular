@@ -6,7 +6,8 @@ FROM ${PYTHON_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /build
 
@@ -14,20 +15,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
-    curl \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY src/workflows/train/requirements.txt requirements.txt
+COPY src/workflows/train/requirements.txt .
 
-RUN pip install --upgrade pip setuptools wheel && \
-    pip wheel --wheel-dir /wheels -r requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip wheel --wheel-dir /wheels -r requirements.txt
 
 FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONPATH=/opt/app/src
 
 WORKDIR /opt/app
@@ -37,12 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /wheels /wheels
-RUN pip install /wheels/* && rm -rf /wheels
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser
 
+COPY --from=builder /wheels /wheels
 COPY src /opt/app/src
 
-RUN useradd -m -u 10001 appuser
+RUN python -m pip install --no-index --find-links=/wheels -r /opt/app/src/workflows/train/requirements.txt && \
+    rm -rf /wheels && \
+    chown -R appuser:appuser /opt/app
+
 USER appuser
 
 # Uses tini as PID 1 to forward signals and reap zombies, ensuring clean shutdown for Ray and flyte tasks

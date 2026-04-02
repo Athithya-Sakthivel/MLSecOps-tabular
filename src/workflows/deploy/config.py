@@ -3,27 +3,140 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Literal
+
+DeploymentProfile = Literal["kind", "eks"]
+
+
+PROFILE_DEFAULTS: dict[DeploymentProfile, dict[str, str]] = {
+    "kind": {
+        "SERVE_NUM_CPUS": "0.5",
+        "SERVE_MIN_REPLICAS": "1",
+        "SERVE_INITIAL_REPLICAS": "1",
+        "SERVE_MAX_REPLICAS": "1",
+        "SERVE_TARGET_ONGOING_REQUESTS": "1",
+        "SERVE_MAX_ONGOING_REQUESTS": "2",
+        "SERVE_BATCH_MAX_SIZE": "4",
+        "SERVE_BATCH_WAIT_TIMEOUT_S": "0.01",
+        "ORT_INTRA_OP_NUM_THREADS": "1",
+        "ORT_INTER_OP_NUM_THREADS": "1",
+        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+        "OTEL_TRACES_SAMPLER_ARG": "0.10",
+        "LOG_LEVEL": "DEBUG",
+        "SLOW_REQUEST_MS": "1000.0",
+    },
+    "eks": {
+        "SERVE_NUM_CPUS": "1.0",
+        "SERVE_MIN_REPLICAS": "2",
+        "SERVE_INITIAL_REPLICAS": "2",
+        "SERVE_MAX_REPLICAS": "8",
+        "SERVE_TARGET_ONGOING_REQUESTS": "2",
+        "SERVE_MAX_ONGOING_REQUESTS": "3",
+        "SERVE_BATCH_MAX_SIZE": "16",
+        "SERVE_BATCH_WAIT_TIMEOUT_S": "0.005",
+        "ORT_INTRA_OP_NUM_THREADS": "0",
+        "ORT_INTER_OP_NUM_THREADS": "1",
+        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+        "OTEL_TRACES_SAMPLER_ARG": "0.10",
+        "LOG_LEVEL": "WARNING",
+        "SLOW_REQUEST_MS": "500.0",
+    },
+}
+
+
+def _profile() -> DeploymentProfile:
+    raw = os.getenv("DEPLOYMENT_PROFILE", "kind").strip().lower()
+    if raw not in PROFILE_DEFAULTS:
+        raise RuntimeError("DEPLOYMENT_PROFILE must be one of: kind, eks")
+    return raw  # type: ignore[return-value]
+
+
+def _profile_default(name: str, default: str) -> str:
+    profile = _profile()
+    return os.getenv(name, PROFILE_DEFAULTS[profile].get(name, default))
+
+
+def _env_str(name: str, default: str = "") -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    return value if value else default
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
-    if raw is None:
+    if raw is None or raw.strip() == "":
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_int(name: str, raw: str) -> int:
+    try:
+        return int(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
 
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
-    return int(raw)
+    return _parse_int(name, raw)
+
+
+def _env_int_profile(name: str, default: int) -> int:
+    raw = _profile_default(name, str(default))
+    return _parse_int(name, raw)
+
+
+def _env_int_any(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and raw.strip() != "":
+            return _parse_int(name, raw)
+    return default
+
+
+def _parse_float(name: str, raw: str) -> float:
+    try:
+        return float(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a float, got {raw!r}") from exc
 
 
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
         return default
-    return float(raw)
+    return _parse_float(name, raw)
+
+
+def _env_float_profile(name: str, default: float) -> float:
+    raw = _profile_default(name, str(default))
+    return _parse_float(name, raw)
+
+
+def _env_float_any(names: tuple[str, ...], default: float) -> float:
+    for name in names:
+        raw = os.getenv(name)
+        if raw is not None and raw.strip() != "":
+            return _parse_float(name, raw)
+    return default
+
+
+def _env_ratio(name: str, default: float) -> float:
+    value = _env_float(name, default)
+    if not 0.0 <= value <= 1.0:
+        raise RuntimeError(f"{name} must be in the range [0.0, 1.0], got {value!r}")
+    return value
+
+
+def _env_ratio_profile(name: str, default: float) -> float:
+    value = _env_float_profile(name, default)
+    if not 0.0 <= value <= 1.0:
+        raise RuntimeError(f"{name} must be in the range [0.0, 1.0], got {value!r}")
+    return value
 
 
 def _env_list(name: str, default: list[str], sep: str = ",") -> list[str]:
@@ -37,6 +150,34 @@ def _env_tuple(name: str, default: tuple[str, ...], sep: str = ",") -> tuple[str
     return tuple(_env_list(name, list(default), sep=sep))
 
 
+def _env_otlp_timeout_seconds() -> float:
+    """
+    OpenTelemetry's current OTLP timeout env var is OTEL_EXPORTER_OTLP_TIMEOUT in milliseconds.
+    Keep the legacy *_SECONDS variable as a fallback for existing deployments.
+    """
+    raw_ms = os.getenv("OTEL_EXPORTER_OTLP_TIMEOUT")
+    if raw_ms is not None and raw_ms.strip() != "":
+        return _parse_float("OTEL_EXPORTER_OTLP_TIMEOUT", raw_ms) / 1000.0
+
+    raw_seconds = os.getenv("OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS")
+    if raw_seconds is not None and raw_seconds.strip() != "":
+        return _parse_float("OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS", raw_seconds)
+
+    return 10.0
+
+
+def _validate_log_level(value: str) -> str:
+    allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+    normalized = value.strip().upper()
+    if not normalized:
+        return "WARNING"
+    if normalized not in allowed:
+        raise RuntimeError(
+            f"LOG_LEVEL must be one of {sorted(allowed)}, got {value!r}"
+        )
+    return normalized
+
+
 @dataclass(frozen=True)
 class Settings:
     # Identity
@@ -45,6 +186,7 @@ class Settings:
     deployment_environment: str
     cluster_name: str
     instance_id: str
+    deployment_profile: DeploymentProfile
 
     # Model
     model_uri: str
@@ -81,66 +223,135 @@ class Settings:
     otel_timeout_seconds: float
     otel_metric_export_interval_ms: int
     otel_metric_export_timeout_ms: int
+    otel_traces_sampler: str
     trace_sample_ratio: float
     log_level: str
 
     # Operational
     slow_request_ms: float
 
+    def __post_init__(self) -> None:
+        if not self.feature_order:
+            raise RuntimeError("FEATURE_ORDER is required and cannot be empty")
+
+        if self.min_replicas < 0:
+            raise RuntimeError("SERVE_MIN_REPLICAS must be >= 0")
+
+        if self.max_replicas < self.min_replicas:
+            raise RuntimeError("SERVE_MAX_REPLICAS must be >= SERVE_MIN_REPLICAS")
+
+        if not (self.min_replicas <= self.initial_replicas <= self.max_replicas):
+            raise RuntimeError(
+                "SERVE_INITIAL_REPLICAS must be between SERVE_MIN_REPLICAS and SERVE_MAX_REPLICAS"
+            )
+
+        if self.target_ongoing_requests < 1:
+            raise RuntimeError("SERVE_TARGET_ONGOING_REQUESTS must be >= 1")
+
+        if self.max_ongoing_requests < self.target_ongoing_requests:
+            raise RuntimeError(
+                "SERVE_MAX_ONGOING_REQUESTS must be >= SERVE_TARGET_ONGOING_REQUESTS"
+            )
+
+        if self.batch_max_size < 1:
+            raise RuntimeError("SERVE_BATCH_MAX_SIZE must be >= 1")
+
+        if self.batch_wait_timeout_s < 0:
+            raise RuntimeError("SERVE_BATCH_WAIT_TIMEOUT_S must be >= 0")
+
+        if self.max_instances_per_request < 1:
+            raise RuntimeError("MAX_INSTANCES_PER_REQUEST must be >= 1")
+
+        if self.replica_num_cpus <= 0:
+            raise RuntimeError("SERVE_NUM_CPUS must be > 0")
+
+        if self.ort_intra_op_num_threads < 0:
+            raise RuntimeError("ORT_INTRA_OP_NUM_THREADS must be >= 0")
+
+        if self.ort_inter_op_num_threads < 0:
+            raise RuntimeError("ORT_INTER_OP_NUM_THREADS must be >= 0")
+
+        if not 0.0 <= self.trace_sample_ratio <= 1.0:
+            raise RuntimeError("OTEL_TRACES_SAMPLER_ARG must be in [0.0, 1.0]")
+
+        if self.slow_request_ms < 0:
+            raise RuntimeError("SLOW_REQUEST_MS must be >= 0")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    deployment_profile = _profile()
+
     feature_order = _env_list("FEATURE_ORDER", [])
     if not feature_order:
         raise RuntimeError("FEATURE_ORDER is required, for example: FEATURE_ORDER=age,income,score")
 
-    model_uri = os.getenv("MODEL_URI", "").strip()
+    model_uri = _env_str("MODEL_URI")
     if not model_uri:
         raise RuntimeError("MODEL_URI is required and should point to a bundle root or a model file")
 
     model_output_names = _env_tuple("MODEL_OUTPUT_NAMES", tuple())
-    model_input_name = os.getenv("MODEL_INPUT_NAME", "").strip() or None
+    model_input_name = _env_str("MODEL_INPUT_NAME") or None
 
-    service_name = os.getenv("OTEL_SERVICE_NAME", "inference-api").strip() or "inference-api"
-    service_version = os.getenv("SERVICE_VERSION", "v1").strip() or "v1"
-    deployment_environment = os.getenv("DEPLOYMENT_ENVIRONMENT", "prod").strip() or "prod"
-    cluster_name = os.getenv("K8S_CLUSTER_NAME", "prod-eks").strip() or "prod-eks"
-    instance_id = os.getenv("POD_NAME", os.getenv("HOSTNAME", "local")).strip() or "local"
+    service_name = _env_str("OTEL_SERVICE_NAME", "inference-api")
+    service_version = _env_str("SERVICE_VERSION", "v1")
+    deployment_environment = _env_str("DEPLOYMENT_ENVIRONMENT", deployment_profile)
+    cluster_name = _env_str("K8S_CLUSTER_NAME", "kind" if deployment_profile == "kind" else "eks")
+    instance_id = _env_str("POD_NAME", _env_str("HOSTNAME", "local"))
 
-    model_version = os.getenv("MODEL_VERSION", "v1").strip() or "v1"
-    model_cache_dir = os.getenv("MODEL_CACHE_DIR", "/tmp/model-cache").strip() or "/tmp/model-cache"
-    model_sha256 = os.getenv("MODEL_SHA256", "").strip() or None
+    model_version = _env_str("MODEL_VERSION", "v1")
+    model_cache_dir = _env_str("MODEL_CACHE_DIR", "/tmp/model-cache")
+    model_sha256 = _env_str("MODEL_SHA256") or None
     allow_extra_features = _env_bool("ALLOW_EXTRA_FEATURES", False)
     max_instances_per_request = _env_int("MAX_INSTANCES_PER_REQUEST", 256)
 
-    serve_deployment_name = os.getenv("SERVE_DEPLOYMENT_NAME", "tabular_inference").strip() or "tabular_inference"
-    replica_num_cpus = _env_float("SERVE_NUM_CPUS", 1.0)
-    min_replicas = _env_int("SERVE_MIN_REPLICAS", 1)
-    initial_replicas = _env_int("SERVE_INITIAL_REPLICAS", min_replicas)
-    max_replicas = _env_int("SERVE_MAX_REPLICAS", 8)
-    target_ongoing_requests = _env_int("SERVE_TARGET_ONGOING_REQUESTS", 2)
-    max_ongoing_requests = _env_int("SERVE_MAX_ONGOING_REQUESTS", max(4, target_ongoing_requests + 2))
+    serve_deployment_name = _env_str("SERVE_DEPLOYMENT_NAME", "tabular_inference")
+    replica_num_cpus = _env_float_profile("SERVE_NUM_CPUS", 1.0)
+    min_replicas = _env_int_profile("SERVE_MIN_REPLICAS", 1)
+    initial_replicas = _env_int_profile("SERVE_INITIAL_REPLICAS", min_replicas)
+    max_replicas = _env_int_profile("SERVE_MAX_REPLICAS", 8)
+    target_ongoing_requests = _env_int_profile("SERVE_TARGET_ONGOING_REQUESTS", 2)
+    max_ongoing_requests = _env_int_profile(
+        "SERVE_MAX_ONGOING_REQUESTS",
+        max(4, target_ongoing_requests + 1),
+    )
     upscale_delay_s = _env_float("SERVE_UPSCALE_DELAY_S", 1.0)
     downscale_delay_s = _env_float("SERVE_DOWNSCALE_DELAY_S", 30.0)
-    batch_max_size = _env_int("SERVE_BATCH_MAX_SIZE", 16)
-    batch_wait_timeout_s = _env_float("SERVE_BATCH_WAIT_TIMEOUT_S", 0.005)
+    batch_max_size = _env_int_profile("SERVE_BATCH_MAX_SIZE", 16)
+    batch_wait_timeout_s = _env_float_profile("SERVE_BATCH_WAIT_TIMEOUT_S", 0.005)
 
-    ort_intra_op_num_threads = _env_int("ORT_INTRA_OP_NUM_THREADS", 0)
-    ort_inter_op_num_threads = _env_int("ORT_INTER_OP_NUM_THREADS", 1)
+    ort_intra_op_num_threads = _env_int_profile("ORT_INTRA_OP_NUM_THREADS", 0)
+    ort_inter_op_num_threads = _env_int_profile("ORT_INTER_OP_NUM_THREADS", 1)
     ort_providers = _env_tuple("ORT_PROVIDERS", ("CPUExecutionProvider",))
     ort_log_severity_level = _env_int("ORT_LOG_SEVERITY_LEVEL", 3)
 
-    otel_endpoint = os.getenv(
+    otel_endpoint = _env_str(
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "http://signoz-otel-collector.signoz.svc.cluster.local:4317",
-    ).strip()
-    otel_timeout_seconds = _env_float("OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS", 10.0)
-    otel_metric_export_interval_ms = _env_int("OTEL_METRIC_EXPORT_INTERVAL_MS", 15000)
-    otel_metric_export_timeout_ms = _env_int("OTEL_METRIC_EXPORT_TIMEOUT_MS", 10000)
-    trace_sample_ratio = _env_float("OTEL_TRACES_SAMPLER_ARG", 0.1)
-    log_level = os.getenv("LOG_LEVEL", "WARNING").strip().upper() or "WARNING"
+    )
+    otel_timeout_seconds = _env_otlp_timeout_seconds()
+    otel_metric_export_interval_ms = _env_int_any(
+        ("OTEL_METRIC_EXPORT_INTERVAL", "OTEL_METRIC_EXPORT_INTERVAL_MS"),
+        15000,
+    )
+    otel_metric_export_timeout_ms = _env_int_any(
+        ("OTEL_METRIC_EXPORT_TIMEOUT", "OTEL_METRIC_EXPORT_TIMEOUT_MS"),
+        10000,
+    )
 
-    slow_request_ms = _env_float("SLOW_REQUEST_MS", 500.0)
+    otel_traces_sampler = _env_str(
+        "OTEL_TRACES_SAMPLER",
+        PROFILE_DEFAULTS[deployment_profile]["OTEL_TRACES_SAMPLER"],
+    )
+    trace_sample_ratio = _env_ratio_profile(
+        "OTEL_TRACES_SAMPLER_ARG",
+        float(PROFILE_DEFAULTS[deployment_profile]["OTEL_TRACES_SAMPLER_ARG"]),
+    )
+
+    log_level = _validate_log_level(
+        _env_str("LOG_LEVEL", PROFILE_DEFAULTS[deployment_profile]["LOG_LEVEL"])
+    )
+    slow_request_ms = _env_float_profile("SLOW_REQUEST_MS", 500.0)
 
     return Settings(
         service_name=service_name,
@@ -148,6 +359,7 @@ def get_settings() -> Settings:
         deployment_environment=deployment_environment,
         cluster_name=cluster_name,
         instance_id=instance_id,
+        deployment_profile=deployment_profile,
         model_uri=model_uri,
         model_version=model_version,
         model_cache_dir=model_cache_dir,
@@ -176,6 +388,7 @@ def get_settings() -> Settings:
         otel_timeout_seconds=otel_timeout_seconds,
         otel_metric_export_interval_ms=otel_metric_export_interval_ms,
         otel_metric_export_timeout_ms=otel_metric_export_timeout_ms,
+        otel_traces_sampler=otel_traces_sampler,
         trace_sample_ratio=trace_sample_ratio,
         log_level=log_level,
         slow_request_ms=slow_request_ms,
