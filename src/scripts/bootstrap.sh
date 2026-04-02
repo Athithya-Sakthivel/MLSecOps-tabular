@@ -78,6 +78,7 @@ python3 -m venv .venv_elt
   flytekitplugins-spark==1.16.15 \
   pyspark==4.1.1 \
   cloudpickle==3.1.2
+  
 python3 -m venv .venv_train
 .venv_train/bin/python -m pip install --upgrade pip wheel setuptools
 .venv_train/bin/python -m pip install \

@@ -13,7 +13,7 @@ echo "${GIT_PAT}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
 
 docker build --no-cache \
   -t "${TRAIN_TASK_IMAGE}" \
-  -f src/workflows/train/Dockerfile.task_image \
+  -f src/workflows/train/Dockerfile.flyte_task \
   .
 
 if [ "${PUSH_IMAGE}" = "true" ]; then

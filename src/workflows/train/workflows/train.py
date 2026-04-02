@@ -20,6 +20,8 @@ from workflows.train.tasks.register_model import register_model
 from workflows.train.tasks.train_model import train_model
 from workflows.train.tasks.validate_dataset import validate_dataset
 
+__all__ = ["train"]
+
 
 @workflow
 def train(

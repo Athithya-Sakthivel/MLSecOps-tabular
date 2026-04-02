@@ -3,13 +3,12 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 from flytekit import Resources, task
 from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
-from flytekitplugins.ray import HeadNodeConfig, RayJobConfig, WorkerNodeConfig
+from flyteplugins.ray import HeadNodeConfig, RayJobConfig, WorkerNodeConfig
 from tasks.common import (
     CATEGORICAL_FEATURES,
     DEFAULT_EARLY_STOPPING_ROUNDS,
@@ -86,8 +85,7 @@ else:
     EARLY_STOPPING_ROUNDS = _env_int("EARLY_STOPPING_ROUNDS", 100, minimum=10)
     TASK_RETRIES = _env_int("TRAIN_TASK_RETRIES", 1, minimum=0)
 
-
-def _worker_train_loop(config: dict[str, Any]) -> None:
+def _worker_train_loop(config: dict[str, float]) -> None:
     import lightgbm as lgb
     import ray
     from ray.train.lightgbm import RayTrainReportCallback, get_network_params

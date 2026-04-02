@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
+
 ARG PYTHON_IMAGE=python:3.12.3-slim@sha256:afc139a0a640942491ec481ad8dda10f2c5b753f5c969393b12480155fe15a63
 
+############################
+# Builder stage
+############################
 FROM ${PYTHON_IMAGE} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
+# System deps for compiling wheels (lightgbm, numpy, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
@@ -17,31 +22,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy only requirements for better layer caching
 COPY src/workflows/train/requirements.txt requirements.txt
 
+# Build wheels (deterministic, faster runtime install)
 RUN pip install --upgrade pip setuptools wheel && \
     pip wheel --wheel-dir /wheels -r requirements.txt
 
+
+############################
+# Runtime stage
+############################
 FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
+    PYTHONPATH=/opt/app \
     PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
+# IMPORTANT: match PYTHONPATH root
+WORKDIR /opt/app
 
+# Runtime deps (lightgbm needs libgomp, tini for signal handling)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
+# Install prebuilt wheels
 COPY --from=builder /wheels /wheels
 RUN pip install /wheels/* && rm -rf /wheels
 
+# Copy full source tree (matches ELT pattern)
+COPY src /opt/app/src
+
+# Non-root user (required for K8s best practices)
 RUN useradd -m -u 10001 appuser
 USER appuser
 
-# Uses tini as PID 1 to forward signals and reap zombies, ensuring clean shutdown for ray
-
+# Clean signal handling (important for Ray workers + Flyte)
 ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -47,11 +47,12 @@ if TRAIN_PROFILE not in {"staging", "prod"}:
 
 TRAIN_SERVICE_ACCOUNT = os.environ.get("TRAIN_SERVICE_ACCOUNT", "ray").strip() or "ray"
 
-TRAIN_TASK_IMAGE = os.environ.get("TRAIN_TASK_IMAGE", "").strip()
+TRAIN_TASK_IMAGE = os.environ.get(
+    "TRAIN_TASK_IMAGE",
+    "ghcr.io/athithya-sakthivel/flyte-train-task:2026-04-02-07-10--44f9de2@sha256:1b7d3e07343db1a2ed220af49c99575eac66d2542de782e140ada78fcdeb2b87",
+).strip()
 if not TRAIN_TASK_IMAGE:
-    raise RuntimeError(
-        "TRAIN_TASK_IMAGE must not be empty. Set it to the container image that includes the train task runtime."
-    )
+    raise RuntimeError("TRAIN_TASK_IMAGE must not be empty. Set it to the container image that includes the train task runtime.")
 
 os.environ["TRAIN_TASK_IMAGE"] = TRAIN_TASK_IMAGE
 
@@ -237,28 +238,11 @@ def lint_sources() -> None:
 
 def import_check() -> None:
     mod = importlib.import_module(WORKFLOW_IMPORT_MODULE)
-    # Be tolerant of naming differences across launch plan conventions.
-    candidates = (
-        "TRAIN_WORKFLOW_LP",
-        "TRAIN_LP",
-        "TRAIN_LAUNCH_PLAN",
-        "TRAIN_MANUAL_LP",
-        "TRAIN_WORKFLOW_LP_NAME",
-        "TRAIN_LP_NAME",
-        "TRAIN_LAUNCH_PLAN_NAME",
-        "TRAIN_MANUAL_LP_NAME",
-    )
-    for name in candidates:
-        if hasattr(mod, name):
-            log("import_ok")
-            return
-
-    for _attr_name, attr_value in vars(mod).items():
-        if "LaunchPlan" in type(attr_value).__name__ and getattr(attr_value, "name", None):
-            log("import_ok")
-            return
-
-    fatal(f"{WORKFLOW_IMPORT_MODULE} does not expose a resolvable train launch plan")
+    if not hasattr(mod, "TRAIN_WORKFLOW_LP"):
+        fatal(f"{WORKFLOW_IMPORT_MODULE} does not expose TRAIN_WORKFLOW_LP")
+    if not hasattr(mod, "TRAIN_WORKFLOW_LP_NAME"):
+        fatal(f"{WORKFLOW_IMPORT_MODULE} does not expose TRAIN_WORKFLOW_LP_NAME")
+    log("import_ok")
 
 
 def _quota_values() -> dict[str, str]:
@@ -449,11 +433,16 @@ def ensure_namespace_bootstrap_ready() -> None:
 
 def registration_tree_files() -> list[Path]:
     files: list[Path] = []
-    for path in sorted((SRC_ROOT / "workflows" / "train").rglob("*")):
-        if "__pycache__" in path.parts or path.is_dir():
+    for path in sorted((SRC_ROOT / "workflows" / "train").rglob("*.py")):
+        if "__pycache__" in path.parts:
             continue
-        if path.suffix == ".py" or path.name in {"requirements.txt", "Dockerfile.task_image"}:
-            files.append(path)
+        files.append(path)
+    for extra in (
+        SRC_ROOT / "workflows" / "train" / "requirements.txt",
+        SRC_ROOT / "workflows" / "train" / "Dockerfile.task_image",
+    ):
+        if extra.is_file():
+            files.append(extra)
     return files
 
 
@@ -478,36 +467,17 @@ def compute_registration_version() -> str:
 def resolve_train_launchplan_name() -> str:
     mod = importlib.import_module(WORKFLOW_IMPORT_MODULE)
 
-    candidates = (
-        "TRAIN_WORKFLOW_LP_NAME",
-        "TRAIN_LP_NAME",
-        "TRAIN_LAUNCH_PLAN_NAME",
-        "TRAIN_MANUAL_LP_NAME",
-    )
-    for name in candidates:
-        value = getattr(mod, name, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    lp_name = getattr(mod, "TRAIN_WORKFLOW_LP_NAME", None)
+    if isinstance(lp_name, str) and lp_name.strip():
+        return lp_name.strip()
 
-    candidates_obj = (
-        "TRAIN_WORKFLOW_LP",
-        "TRAIN_LP",
-        "TRAIN_LAUNCH_PLAN",
-        "TRAIN_MANUAL_LP",
-    )
-    for name in candidates_obj:
-        lp = getattr(mod, name, None)
-        if lp is not None:
-            lp_name = getattr(lp, "name", None)
-            if isinstance(lp_name, str) and lp_name.strip():
-                return lp_name.strip()
-
-    for attr_value in vars(mod).values():
-        lp_name = getattr(attr_value, "name", None)
-        if "LaunchPlan" in type(attr_value).__name__ and isinstance(lp_name, str) and lp_name.strip():
-            return lp_name.strip()
-
-    fatal(f"could not resolve train launch plan name from {WORKFLOW_IMPORT_MODULE}")
+    lp = getattr(mod, "TRAIN_WORKFLOW_LP", None)
+    if lp is None:
+        fatal(f"{WORKFLOW_IMPORT_MODULE} does not expose TRAIN_WORKFLOW_LP")
+    name = getattr(lp, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        fatal("could not resolve TRAIN launch plan name")
+    return name.strip()
 
 
 def pyflyte_register_supports_copy_or_fast_flag() -> tuple[bool, bool]:
