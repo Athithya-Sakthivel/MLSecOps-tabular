@@ -1,13 +1,16 @@
 name: train-image-ci
-
 on:
   workflow_dispatch:
+
   push:
     branches: [main]
     paths:
+      - src/workflows/train/tasks/**
       - src/workflows/train/Dockerfile.flyte_task
+
   pull_request:
     paths:
+      - src/workflows/train/tasks/**
       - src/workflows/train/Dockerfile.flyte_task
 
 permissions:

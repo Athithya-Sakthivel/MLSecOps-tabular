@@ -305,9 +305,6 @@ def _read_parquet_frame(
 ) -> pd.DataFrame:
     """
     Read a single physical parquet file, not a dataset path.
-
-    This deliberately avoids dataset-style discovery/merging so partitioned
-    directory metadata does not collide with the physical file schema.
     """
     parquet_file = pq.ParquetFile(path, filesystem=filesystem)
     table = parquet_file.read(columns=columns, use_threads=True)
@@ -325,17 +322,6 @@ def _normalize_as_of_date_column(df: pd.DataFrame) -> pd.DataFrame:
 def load_gold_frame(dataset_uri: str, columns: list[str] | None = None) -> pd.DataFrame:
     """
     Robust parquet loader for the gold training matrix.
-
-    Behavior:
-    - resolves the storage URI explicitly
-    - discovers only physical .parquet files
-    - reads each file independently through ParquetFile.read()
-    - normalizes as_of_date only after the per-file read
-    - concatenates frames only after each file is safely loaded
-
-    This avoids schema-merge failures that happen when a partitioned dataset
-    exposes the same logical column through both file metadata and partition
-    directory metadata.
     """
     log_json(msg="load_gold_start", dataset_uri=str(dataset_uri), output_path="/tmp/gold_canonical.parquet")
 
@@ -412,11 +398,19 @@ def validate_gold_contract(
             raise ValueError(f"{label} has dtype drift: {json.dumps(mismatched, sort_keys=True, default=str)}")
 
 
+def _normalize_utc_timestamp_series(series: pd.Series) -> pd.Series:
+    """
+    Force pandas to represent timestamps as UTC-aware nanosecond precision.
+    """
+    ts = pd.to_datetime(series, utc=True, errors="raise")
+    return ts.astype("datetime64[ns, UTC]")
+
+
 def coerce_contract_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     out["trip_id"] = out["trip_id"].astype("string")
-    out[TIMESTAMP_COLUMN] = pd.to_datetime(out[TIMESTAMP_COLUMN], utc=True, errors="raise")
+    out[TIMESTAMP_COLUMN] = _normalize_utc_timestamp_series(out[TIMESTAMP_COLUMN])
     out["as_of_date"] = pd.to_datetime(out["as_of_date"], errors="raise").dt.date
     out["schema_version"] = out["schema_version"].astype("string")
     out["feature_version"] = out["feature_version"].astype("string")
