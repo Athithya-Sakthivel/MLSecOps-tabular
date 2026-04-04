@@ -5,6 +5,21 @@ lc:
 	bash src/infra/elt/iceberg.sh --rollout && bash src/infra/elt/spark_operator.sh --rollout && \
 	bash src/infra/train/kuberay_operator.sh --rollout && python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/train/commands.sh
 
+
+train:
+	kind create cluster --name local-cluster && \
+	K8S_CLUSTER=kind bash src/infra/core/default_storage_class.sh && \
+	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh --rollout && \
+	bash src/infra/train/kuberay_operator.sh --rollout && python3 src/infra/train/mlflow_server.py
+
+elt:
+	bash src/infra/elt/iceberg_image.sh --rollout && bash src/infra/elt/spark_operator.sh && \
+	python3 src/infra/core/flyte_setup.py --rollout && \
+
+
+prune-elt:
+	bash 
+
 set-sa:
 	bash src/core/default_storage_class.sh
 
@@ -27,27 +42,13 @@ clean:
 	rm -rf src/terraform/.plans
 	clear
 
+
 recreate:
 	make rollout-pg && bash src/tests/core/postgres_cluster.sh || true
 
 rollout-signoz:
 	bash src/core/signoz.sh --rollout && bash src/tests/signoz.sh
 
-rollout-default-sc:
-	bash src/core/default_storage_class.sh
-
-rollout-pg:
-	bash src/core/postgres_cluster.sh --rollout
-
-rollout-kuberay-operator:
-	bash src/core/kuberay_operator.sh --rollout && bash src/tests/kuberay_operator.sh
-
-test-pg:
-	bash src/tests/postgres.sh
-
-delete-pg:
-	kubectl delete crd $(kubectl get crd -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | grep -E 'cnpg.io|barmancloud.cnpg.io') || true
-	kubectl delete ns cnpg-system databases || true
 
 iac-staging:
 	bash src/terraform/run.sh --create --env staging || true
@@ -69,269 +70,10 @@ set-prod-eks-context:
 
 set-kind-context:
 	kubectl config use-context kind-rag8s-local
-	
-s3:
-	ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text); \
-	if [ -z "$$S3_BUCKET" ]; then \
-		BUCKET=s3-backups-bucket-$$ACCOUNT_ID; \
-	else \
-		BUCKET=$$S3_BUCKET; \
-	fi; \
-	if ! aws s3api head-bucket --bucket $$BUCKET 2>/dev/null; then \
-		aws s3api create-bucket \
-			--bucket $$BUCKET \
-			--region $$AWS_REGION \
-			--create-bucket-configuration LocationConstraint=$$AWS_REGION; \
-	else \
-		echo "Bucket $$BUCKET already exists"; \
-	fi; \
-	if ! grep -q "^export S3_BUCKET=$$BUCKET" $$HOME/.bashrc 2>/dev/null; then \
-		echo "export S3_BUCKET=$$BUCKET" >> $$HOME/.bashrc; \
-		echo "Added S3_BUCKET=$$BUCKET to ~/.bashrc"; \
-	fi
 
-delete-backups:
-	aws s3 rm s3://${S3_BUCKET}/app-postgres-objectstore/ --recursive || true
-
-delete-s3:
-	if [ -z "$$S3_BUCKET" ]; then \
-		ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text); \
-		BUCKET=s3-backups-bucket-$$ACCOUNT_ID; \
-	else \
-		BUCKET=$$S3_BUCKET; \
-	fi; \
-	if aws s3api head-bucket --bucket $$BUCKET 2>/dev/null; then \
-		aws s3 rm s3://$$BUCKET --recursive; \
-		aws s3api delete-bucket --bucket $$BUCKET --region $$AWS_REGION; \
-		echo "Deleted $$BUCKET"; \
-	else \
-		echo "Bucket $$BUCKET does not exist"; \
-	fi
-	
-
-push-frontend:
-	ruff check src/services/frontend/ --fix
-	git add .github/workflows/ src/services/frontend/
-	gitleaks detect --source src/services/frontend/ --no-git --exit-code 1
-	git commit -m "updating nginx SPA image"
-	git push origin main
-
-push-auth:
-	ruff check src/services/auth/ --fix
-	git add .github src/services/auth/
-	gitleaks detect --source src/services/auth/ --no-git --exit-code 1
-	git commit -m "updating auth server"
-	git push origin main
-
-push-ts:
-	ruff check src/services/task-service --fix
-	git add .github src/services/task-service
-	gitleaks detect --source src/services/task-service --no-git --exit-code 1
-	git commit -m "updating task service"
-	git push origin main
-
-push-as:
-	ruff check src/services/activity-service --fix
-	git add .github src/services/activity-service
-	gitleaks detect --source src/services/activity-service --no-git --exit-code 1
-	git commit -m "updating activity service"
-	git push origin main
-
-
-
-
-
-rollout-valkey:
-	bash src/core/valkey.sh --rollout
-
-delete-valkey:
-	bash src/core/valkey.sh --delete --yes
-
-
-
-
-
-
-
-
-create-sa:
-	python3 infra/base_infra/storage_acc.py --create
-
-delete-sa:
-	python3 infra/base_infra/storage_acc.py --delete
-
-pulumi-up:
-	bash infra/pulumi_azure/run.sh --create || true
-
-pulumi-destroy:
-	bash infra/pulumi_azure/run.sh --delete || true
-
-pulumi-preview:
-	bash infra/pulumi_azure/run.sh --preview || true
-
-
-rollout-qdrant:
-	python3 infra/generators/qdrant_cluster.py --rollout
-rollout-qdrant-with-flux:
-	python3 infra/generators/qdrant_cluster.py --rollout --flux
-
-
-delete-qdrant:
-	kubectl delete ns qdrant
-
-
-dense-image:
-	bash apps/dense/test_and_push_dense.sh
-
-rollout-dense:
-	python3 infra/generators/dense.py --rollout
-
-delete-dense:
-	python3 infra/generators/dense.py --delete
-
-
-sparse-image:
-	bash apps/sparse/test_and_push_sparse.sh
-
-rollout-sparse:
-	python3 infra/generators/sparse.py --rollout
-
-delete-sparse:
-	python3 infra/generators/sparse.py --delete
-
-
-base-index-image:
-	bash apps/index/build_and_push_base_image.sh
-
-index-image:
-	bash apps/index/build_and_push_image.sh
-
-rollout-indexing-cronjob:
-	python3 infra/generators/indexing_cronjob.py --rollout
-
-delete-indexing-cronjob:
-	kubectl delete ns indexing
-
-
-frontend-image:
-	bash apps/inference/frontend/build_and_push_frontend.sh
-
-retrieval-image:
-	bash apps/inference/retrieval/test_and_push_retriever.sh
-
-
-rollout-reranker:
-	python3 infra/generators/reranker.py --rollout
-
-reranker-image:
-	bash apps/reranker/test_and_push_reranker.sh
-
-delete-reranker:
-	python3 infra/generators/reranker.py --delete
-	
-setup-flux:
-	curl -s https://fluxcd.io/install.sh | sudo FLUX_VERSION=2.7.5 bash || true
-	python3 infra/setup/setup_fluxcd.py --auto-push
-
-
-
-delete-flux:
-	kubectl delete ns flux-system --grace-period=0 --force --wait=false || true
-	kubectl get crd | grep fluxcd.io | awk '{print $$1}' | xargs -r kubectl delete crd --grace-period=0 --force || true
-	kubectl delete crd gitrepositories.source.toolkit.fluxcd.io helmrepositories.source.toolkit.fluxcd.io --grace-period=0 --force || true
-	kubectl get ns flux-system -o json 2>/dev/null | jq 'del(.spec.finalizers)' | kubectl replace --raw "/api/v1/namespaces/flux-system/finalize" -f - || true
-
-inspect-flux:
-	tail -f infra/manifests/flux-system/setup_fluxcd.log
-
-flux-status:
-	flux check && flux get kustomizations -n flux-system
-
-
-rollout-retriever:
-	python3 infra/generators/retriever.py --rollout
-
-rollout-frontend:
-	python3 infra/generators/frontend_auth.py --rollout --confirm
-
-rollout-cloudflared-agents:
-	python3 infra/generators/cloudflared.py --rollout --replicas $${CLOUDFLARED_TUNNEL_REPLICAS} --namespace inference
-
-rollout-clickhouse:
-	python3 infra/generators/clickhouse.py --rollout
-
-rollout-vector:
-	python3 infra/generators/vector_logger.py --rollout
-
-rollout-vm:
-	python3 infra/generators/monitoring.py --rollout
-
-rollout-runbooks:
-	bash infra/base_infra/az_runbooks.sh
-
-rollout-alert-manager:
-	python3 infra/generators/alerting.py --rollout
-
-rollout-dashboards:
-	python3 infra/generators/dashboards.py --rollout
-
-
-delete-retriever:
-	python3 infra/generators/retriever.py --delete || true
-
-delete-frontend:
-	python3 infra/generators/frontend_auth.py --delete --confirm || true
 
 delete-cloudflared-agents:
 	python3 infra/generators/cloudflared.py --delete --namespace inference || true
-
-delete-clickhouse:
-	python3 infra/generators/clickhouse.py --delete --confirm || true
-
-delete-vector:
-	python3 infra/generators/vector_logger.py --delete || true
- 
-delete-vm:
-	python3 infra/generators/monitoring.py --delete || true
-
-delete-runbooks:
-	bash infra/base_infra/az_runbooks.sh --delete || true
-
-delete-alert-manager:
-	python3 infra/generators/alerting.py --delete --confirm || true
-
-delete-dashboards:
-	python3 infra/generators/dashboards.py --delete || true
-
-rollout-models: rollout-dense rollout-sparse rollout-reranker
-rollout-inference-svcs: rollout-retriever rollout-frontend
-rollout-observability-stack: rollout-prometheus rollout-clickhouse rollout-vector rollout-dashboards
-
-
-run-indexing-cronjob-kind:
-	@echo "[make fix-kind-dns] invoking utils/fix_kind_cluster_dns.sh"
-	@chmod +x utils/fix_kind_cluster_dns.sh || true
-	@utils/fix_kind_cluster_dns.sh --timeout 60
-	sleep 5
-	python3 infra/generators/indexing_cronjob.py --rollout
-	python3 infra/runners/run_indexing_cronjob_kind.py --wait-for-running --wait-running-timeout 120
-
-
-fix-kind-dns:
-	@echo "[make fix-kind-dns] invoking utils/fix_kind_cluster_dns.sh"
-	@chmod +x utils/fix_kind_cluster_dns.sh || true
-	@utils/fix_kind_cluster_dns.sh --timeout 60
-
-
-PY ?= python3
-CONTROL := infra/runners/backup_and_restore.sh
-
-qdrant-backup:
-	@bash $(CONTROL) backup
-
-qdrant-restore:
-	@bash $(CONTROL) restore
-
 
 cloudflare-setup:
 	bash infra/setup/cloudflared.sh
@@ -343,51 +85,3 @@ cloudflare-logout:
 	unset CLOUDFLARE_TUNNEL_CREDENTIALS_B64 && \
 	unset CLOUDFLARE_TUNNEL_NAME
 
-
-test-vector-connection:
-	make fix-dns
-	bash infra/tests/test_vector_clickhouse_connection.sh
-
-test-retriever:
-	make rollout-vm
-	make rollout-retriever
-	bash infra/tests/monitoring/test_retriever.sh || true
-
-
-
-docker-login:
-	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
-
-
-
-fix-dns: fix-kind-dns
-
-CH_NS ?= observability
-
-.PHONY: ch-shell ch-query
-
-ch-shell:
-	@POD="$$(kubectl -n $(CH_NS) get pods -l app=clickhouse -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-	kubectl -n $(CH_NS) get pods --no-headers 2>/dev/null | awk '/clickhouse|ch-single/ {print $$1; exit}')" ; \
-	if [ -z "$$POD" ]; then \
-		echo "[error] no ClickHouse pod found in namespace $(CH_NS)"; \
-		kubectl -n $(CH_NS) get pods || true; \
-		exit 1; \
-	fi ; \
-	echo "[info] connecting to ClickHouse pod $$POD in namespace $(CH_NS)"; \
-	kubectl -n $(CH_NS) exec -it $$POD -- clickhouse-client
-
-ch-query:
-	@QUERY="$${QUERY}" ; \
-	if [ -z "$$QUERY" ]; then \
-		echo "Usage: make ch-query QUERY=\"SELECT ...\""; exit 2; \
-	fi ; \
-	POD="$$(kubectl -n $(CH_NS) get pods -l app=clickhouse -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || \
-	kubectl -n $(CH_NS) get pods --no-headers 2>/dev/null | awk '/clickhouse|ch-single/ {print $$1; exit}')" ; \
-	if [ -z "$$POD" ]; then \
-		echo "[error] no ClickHouse pod found in namespace $(CH_NS)"; \
-		kubectl -n $(CH_NS) get pods || true; \
-		exit 1; \
-	fi ; \
-	echo "[info] running query on $$POD in namespace $(CH_NS)"; \
-	echo "$$QUERY" | kubectl -n $(CH_NS) exec -i $$POD -- clickhouse-client --multiquery

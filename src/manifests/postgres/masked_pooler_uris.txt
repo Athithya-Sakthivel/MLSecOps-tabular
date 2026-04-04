@@ -4,4 +4,4 @@ Connection URIs (masked):
 postgresql://app:*****@postgres-pooler.default:5432/flyte_admin
 postgresql://app:*****@postgres-pooler.default:5432/datacatalog
 postgresql://app:*****@postgres-pooler.default:5432/mlflow
-postgresql://app:*****@postgres-pooler.default:5432/feast
+postgresql://app:*****@postgres-pooler.default:5432/iceberg

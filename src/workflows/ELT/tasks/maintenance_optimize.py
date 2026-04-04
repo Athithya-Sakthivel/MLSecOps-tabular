@@ -39,31 +39,43 @@ _handler.setFormatter(logging.Formatter("%(message)s"))
 LOG.handlers[:] = [_handler]
 LOG.propagate = False
 
-K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
+K8S_CLUSTER = (os.environ.get("K8S_CLUSTER", "kind") or "kind").strip().lower()
 ELT_PROFILE = (
-    os.environ.get(
-        "ELT_PROFILE",
-        "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod",
-    )
-    .strip()
-    .lower()
+    os.environ.get("ELT_PROFILE")
+    or ("dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod")
+).strip().lower()
+
+DEFAULT_EXPIRE_TABLES = (
+    BRONZE_TRIPS_TABLE,
+    BRONZE_TAXI_ZONE_TABLE,
+    SILVER_TRIPS_TABLE,
+    GOLD_TRAINING_TABLE,
+    GOLD_CONTRACT_TABLE,
 )
+
+DEFAULT_REWRITE_WHERE = "as_of_date >= date_sub(current_date(), 30)"
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
-    value = int(os.environ.get(name, str(default)))
+    raw = (os.environ.get(name, str(default)) or str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
     return max(value, minimum)
 
 
 def _env_str(name: str, default: str) -> str:
-    return os.environ.get(name, default).strip()
+    raw = os.environ.get(name, default)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    return raw or default
 
 
 ICEBERG_EXPIRE_DAYS = _env_int("ICEBERG_EXPIRE_DAYS", 7, minimum=0)
 ICEBERG_ORPHAN_DAYS = _env_int("ICEBERG_ORPHAN_DAYS", 3, minimum=0)
 ICEBERG_RETAIN_LAST = _env_int("ICEBERG_RETAIN_LAST", 2, minimum=1)
-
-DEFAULT_REWRITE_WHERE = "as_of_date >= date_sub(current_date(), 30)"
 
 
 @dataclass(frozen=True)
@@ -111,8 +123,11 @@ def utc_cutoff_string(days: int) -> str:
     return cutoff.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def execute_sql_action(spark: SparkSession, statement: str) -> None:
-    spark.sql(statement).collect()
+def execute_sql_action(spark: SparkSession, statement: str, *, label: str) -> None:
+    try:
+        spark.sql(statement).collect()
+    except Exception as exc:
+        raise RuntimeError(f"{label} failed: {exc}") from exc
 
 
 def expire_snapshots_call(table_id: str, older_than: str) -> str:
@@ -149,14 +164,14 @@ def rewrite_data_files_call(table_id: str, where_clause: str) -> str:
 
 
 def parse_table_list(env_name: str, default_value: str) -> list[str]:
-    raw = os.environ.get(env_name, default_value).strip()
+    raw = _env_str(env_name, default_value)
     if not raw:
         return []
     return dedupe_preserve_order([qualify_table_id(item) for item in split_csv(raw)])
 
 
 def parse_table_predicate_map(env_name: str) -> dict[str, str]:
-    raw = os.environ.get(env_name, "").strip()
+    raw = _env_str(env_name, "")
     if not raw:
         return {}
 
@@ -172,13 +187,16 @@ def parse_table_predicate_map(env_name: str) -> dict[str, str]:
     for key, value in parsed.items():
         table_id = qualify_table_id(str(key).strip())
         predicate = str(value).strip()
-        if predicate:
+        if table_id and predicate:
             out[table_id] = predicate
     return out
 
 
 def table_has_column(spark: SparkSession, table_id: str, column: str) -> bool:
-    return column in spark.table(table_id).columns
+    try:
+        return column in spark.table(table_id).columns
+    except Exception:
+        return False
 
 
 def table_op_result(table_id: str, operation: str, status: str, message: str = "") -> dict[str, Any]:
@@ -247,34 +265,16 @@ def maintenance_spark_conf() -> dict[str, str]:
 )
 def maintenance_optimize() -> MaintenanceResult:
     spark = get_spark_session()
-    spark.sparkContext.setLogLevel(os.environ.get("SPARK_LOG_LEVEL", "WARN"))
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    spark.sparkContext.setLogLevel(_env_str("SPARK_LOG_LEVEL", "WARN"))
     validate_iceberg_catalog(spark)
 
     run_id = os.environ.get("RUN_ID") or os.environ.get("FLYTE_INTERNAL_EXECUTION_ID") or uuid.uuid4().hex
     continue_on_error = parse_bool(os.environ.get("MAINTENANCE_CONTINUE_ON_ERROR"), default=True)
 
-    expire_tables = parse_table_list(
-        "ICEBERG_MAINTENANCE_EXPIRE_TABLES",
-        ",".join(
-            [
-                BRONZE_TRIPS_TABLE,
-                BRONZE_TAXI_ZONE_TABLE,
-                SILVER_TRIPS_TABLE,
-                GOLD_TRAINING_TABLE,
-                GOLD_CONTRACT_TABLE,
-            ]
-        ),
-    )
-
-    orphan_tables = parse_table_list(
-        "ICEBERG_MAINTENANCE_ORPHAN_TABLES",
-        ",".join(expire_tables),
-    )
-
-    rewrite_tables = parse_table_list(
-        "ICEBERG_MAINTENANCE_REWRITE_TABLES",
-        GOLD_TRAINING_TABLE,
-    )
+    expire_tables = parse_table_list("ICEBERG_MAINTENANCE_EXPIRE_TABLES", ",".join(DEFAULT_EXPIRE_TABLES))
+    orphan_tables = parse_table_list("ICEBERG_MAINTENANCE_ORPHAN_TABLES", ",".join(expire_tables))
+    rewrite_tables = parse_table_list("ICEBERG_MAINTENANCE_REWRITE_TABLES", GOLD_TRAINING_TABLE)
 
     rewrite_where_by_table = parse_table_predicate_map("ICEBERG_MAINTENANCE_REWRITE_WHERE_BY_TABLE_JSON")
     if not rewrite_where_by_table:
@@ -308,7 +308,6 @@ def maintenance_optimize() -> MaintenanceResult:
 
     expire_before = utc_cutoff_string(ICEBERG_EXPIRE_DAYS)
     orphan_before = utc_cutoff_string(ICEBERG_ORPHAN_DAYS)
-
     orphan_only_tables = [table_id for table_id in orphan_tables if table_id not in expire_tables]
 
     for table_id in expire_tables:
@@ -327,9 +326,13 @@ def maintenance_optimize() -> MaintenanceResult:
 
         try:
             log_json(msg="maintenance_expire_start", table=table_id, older_than=expire_before)
-            execute_sql_action(spark, expire_snapshots_call(table_id, expire_before))
+            execute_sql_action(
+                spark,
+                expire_snapshots_call(table_id, expire_before),
+                label=f"expire_snapshots({table_id})",
+            )
             log_json(msg="maintenance_expire_done", table=table_id)
-            expired_done.append(table_id)
+            append_unique(expired_done, table_id)
             table_results.append(
                 table_op_result(
                     table_id=table_id,
@@ -345,7 +348,11 @@ def maintenance_optimize() -> MaintenanceResult:
                     table=table_id,
                     older_than=orphan_before,
                 )
-                execute_sql_action(spark, remove_orphan_files_call(table_id, orphan_before))
+                execute_sql_action(
+                    spark,
+                    remove_orphan_files_call(table_id, orphan_before),
+                    label=f"remove_orphan_files({table_id})",
+                )
                 log_json(msg="maintenance_orphan_cleanup_done", table=table_id)
                 table_results.append(
                     table_op_result(
@@ -365,11 +372,7 @@ def maintenance_optimize() -> MaintenanceResult:
                     message=str(exc),
                 )
             )
-            log_json(
-                msg="maintenance_expire_orphan_failed",
-                table=table_id,
-                error=str(exc),
-            )
+            log_json(msg="maintenance_expire_orphan_failed", table=table_id, error=str(exc))
             if not continue_on_error:
                 raise
 
@@ -393,7 +396,11 @@ def maintenance_optimize() -> MaintenanceResult:
                 table=table_id,
                 older_than=orphan_before,
             )
-            execute_sql_action(spark, remove_orphan_files_call(table_id, orphan_before))
+            execute_sql_action(
+                spark,
+                remove_orphan_files_call(table_id, orphan_before),
+                label=f"remove_orphan_files({table_id})",
+            )
             log_json(msg="maintenance_orphan_cleanup_done", table=table_id)
             table_results.append(
                 table_op_result(
@@ -413,11 +420,7 @@ def maintenance_optimize() -> MaintenanceResult:
                     message=str(exc),
                 )
             )
-            log_json(
-                msg="maintenance_orphan_cleanup_failed",
-                table=table_id,
-                error=str(exc),
-            )
+            log_json(msg="maintenance_orphan_cleanup_failed", table=table_id, error=str(exc))
             if not continue_on_error:
                 raise
 
@@ -468,10 +471,14 @@ def maintenance_optimize() -> MaintenanceResult:
                 continue
 
             log_json(msg="maintenance_rewrite_start", table=table_id, where=where_clause)
-            execute_sql_action(spark, rewrite_data_files_call(table_id, where_clause))
+            execute_sql_action(
+                spark,
+                rewrite_data_files_call(table_id, where_clause),
+                label=f"rewrite_data_files({table_id})",
+            )
             log_json(msg="maintenance_rewrite_done", table=table_id)
 
-            rewritten_done.append(table_id)
+            append_unique(rewritten_done, table_id)
             table_results.append(
                 table_op_result(
                     table_id=table_id,
@@ -490,11 +497,7 @@ def maintenance_optimize() -> MaintenanceResult:
                     message=str(exc),
                 )
             )
-            log_json(
-                msg="maintenance_rewrite_failed",
-                table=table_id,
-                error=str(exc),
-            )
+            log_json(msg="maintenance_rewrite_failed", table=table_id, error=str(exc))
             if not continue_on_error:
                 raise
 

@@ -13,7 +13,7 @@ spec:
       postInitSQL:
         - CREATE DATABASE datacatalog OWNER app;
         - CREATE DATABASE mlflow OWNER app;
-        - CREATE DATABASE feast OWNER app;
+        - CREATE DATABASE iceberg OWNER app;
       postInitApplicationSQL:
         - ALTER SCHEMA public OWNER TO app;
   storage:

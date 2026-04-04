@@ -9,7 +9,7 @@ TARGET_NS="${TARGET_NS:-default}"
 CLUSTER_NAME="${CLUSTER_NAME:-postgres-cluster}"
 POOLER_NAME="${POOLER_NAME:-postgres-pooler}"
 INITDB_DB="${INITDB_DB:-flyte_admin}"
-ADDITIONAL_DBS=(datacatalog mlflow feast)
+ADDITIONAL_DBS=(datacatalog mlflow iceberg)
 ALL_DBS=("${INITDB_DB}" "${ADDITIONAL_DBS[@]}")
 
 TEST_IMAGE="${TEST_IMAGE:-ghcr.io/cloudnative-pg/postgresql:18.3-minimal-trixie}"

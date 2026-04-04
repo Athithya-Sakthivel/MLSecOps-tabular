@@ -6,7 +6,8 @@ __pycache__/
 # C extensions
 *.so
 .venv_train
-
+.venv_train_dev
+.repo
 .venv_elt
 .venv_deploy
 # Distribution / packaging

@@ -8,8 +8,12 @@ metadata:
     app.kubernetes.io/component: server
 spec:
   replicas: 1
+  minReadySeconds: 10
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: mlflow
@@ -20,7 +24,7 @@ spec:
         app.kubernetes.io/name: mlflow
         app.kubernetes.io/component: server
       annotations:
-        mlflow.io/config-checksum: 7da664cc9577d2996850a8a00e06d324d5131c818dc0d38e057a2c4db11abdbd
+        mlflow.io/config-checksum: 1dd185913b53eee6e2669bbdfa9790b625af02519d18b2bf529fc49f193b01f8
     spec:
       serviceAccountName: mlflow
       securityContext:
@@ -30,9 +34,17 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: mlflow
+            app.kubernetes.io/component: server
       containers:
       - name: mlflow
-        image: ghcr.io/athithya-sakthivel/mlflow:2026-04-03-08-10--22db809@sha256:5a8ae55baa1aaed0411e90c4c3bd5c9564b47e5cc8f315e16804cdbf2835f7d2
+        image: ghcr.io/athithya-sakthivel/mlflow:2026-04-03-20-21--861d47a@sha256:9bb811f9af11963e9eecd331cc05fe8dd7a9f683216ec1a36453643fe85e55d7
         imagePullPolicy: IfNotPresent
         command:
         - /bin/sh
@@ -42,15 +54,18 @@ spec:
           echo \"[mlflow][server] mlflow=$(mlflow --version 2>&1)\" >&2\necho \"[mlflow][server] backend=${DB_HOST}:${DB_PORT}/${DB_NAME}\"\
           \ >&2\necho \"[mlflow][server] artifacts=${MLFLOW_ARTIFACTS_DESTINATION}\" >&2\necho \"[mlflow][server] workers=${MLFLOW_WORKERS}\"\
           \ >&2\necho \"[mlflow][server] disable_security_middleware=${MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE}\" >&2\n\
-          echo \"[mlflow][server] secrets_cache_ttl=${MLFLOW_SECRETS_CACHE_TTL}\" >&2\necho \"[mlflow][server] secrets_cache_max_size=${MLFLOW_SECRETS_CACHE_MAX_SIZE}\"\
+          echo \"[mlflow][server] enable_job_execution=${MLFLOW_SERVER_ENABLE_JOB_EXECUTION}\" >&2\necho \"[mlflow][server]\
+          \ allowed_hosts=${MLFLOW_SERVER_ALLOWED_HOSTS}\" >&2\necho \"[mlflow][server] x_frame_options=${MLFLOW_SERVER_X_FRAME_OPTIONS}\"\
+          \ >&2\necho \"[mlflow][server] secrets_cache_ttl=${MLFLOW_SECRETS_CACHE_TTL}\" >&2\necho \"[mlflow][server] secrets_cache_max_size=${MLFLOW_SECRETS_CACHE_MAX_SIZE}\"\
           \ >&2\nBACKEND_URI=\"$(python3 - <<'PY'\nimport os\nfrom urllib.parse import quote\n\nuser = quote(os.environ[\"\
           DB_USER\"], safe=\"\")\npassword = quote(os.environ[\"DB_PASSWORD\"], safe=\"\")\nprint(\n    \"postgresql://%s:%s@%s:%s/%s\"\
           \n    % (\n        user,\n        password,\n        os.environ[\"DB_HOST\"],\n        os.environ[\"DB_PORT\"],\n\
           \        os.environ[\"DB_NAME\"],\n    )\n)\nPY\n)\"\necho \"[mlflow][server] backend_uri=postgresql://${DB_USER}:*****@${DB_HOST}:${DB_PORT}/${DB_NAME}\"\
-          \ >&2\nexec mlflow server \\\n  --host 0.0.0.0 \\\n  --port \"${MLFLOW_PORT}\" \\\n  --disable-security-middleware\
-          \ \\\n  --backend-store-uri \"${BACKEND_URI}\" \\\n  --registry-store-uri \"${BACKEND_URI}\" \\\n  --artifacts-destination\
-          \ \"${MLFLOW_ARTIFACTS_DESTINATION}\" \\\n  --serve-artifacts \\\n  --workers \"${MLFLOW_WORKERS}\" \\\n  --secrets-cache-ttl\
-          \ \"${MLFLOW_SECRETS_CACHE_TTL}\" \\\n  --secrets-cache-max-size \"${MLFLOW_SECRETS_CACHE_MAX_SIZE}\"\n"
+          \ >&2\nexec mlflow server \\\n  --host 0.0.0.0 \\\n  --port \"${MLFLOW_PORT}\" \\\n  --allowed-hosts \"${MLFLOW_SERVER_ALLOWED_HOSTS}\"\
+          \ \\\n  --x-frame-options \"${MLFLOW_SERVER_X_FRAME_OPTIONS}\" \\\n  --backend-store-uri \"${BACKEND_URI}\" \\\n\
+          \  --registry-store-uri \"${BACKEND_URI}\" \\\n  --artifacts-destination \"${MLFLOW_ARTIFACTS_DESTINATION}\" \\\n\
+          \  --serve-artifacts \\\n  --workers \"${MLFLOW_WORKERS}\" \\\n  --secrets-cache-ttl \"${MLFLOW_SECRETS_CACHE_TTL}\"\
+          \ \\\n  --secrets-cache-max-size \"${MLFLOW_SECRETS_CACHE_MAX_SIZE}\"\n"
         env:
         - name: DB_HOST
           value: postgres-pooler.default.svc.cluster.local
@@ -76,7 +91,13 @@ spec:
         - name: MLFLOW_ARTIFACTS_DESTINATION
           value: s3://e2e-mlops-data-681802563986
         - name: MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE
-          value: 'true'
+          value: 'false'
+        - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+          value: 'false'
+        - name: MLFLOW_SERVER_ALLOWED_HOSTS
+          value: localhost:*,127.0.0.1:*,[::1]:*,mlflow,mlflow:5000,mlflow.mlflow.svc,mlflow.mlflow.svc:5000,mlflow.mlflow.svc.cluster.local,mlflow.mlflow.svc.cluster.local:5000
+        - name: MLFLOW_SERVER_X_FRAME_OPTIONS
+          value: SAMEORIGIN
         - name: AWS_REGION
           value: ap-south-1
         - name: AWS_DEFAULT_REGION
@@ -119,20 +140,25 @@ spec:
           periodSeconds: 5
           failureThreshold: 120
         readinessProbe:
-          httpGet:
-            path: /
-            port: http
-            scheme: HTTP
-          timeoutSeconds: 10
+          exec:
+            command:
+            - /bin/sh
+            - -lc
+            - "python3 - <<'PY'\nimport sys\nfrom urllib.request import Request, urlopen\nurl = \"http://127.0.0.1:5000/\"\
+              \nhost = \"mlflow.mlflow.svc.cluster.local:5000\"\nreq = Request(url, method=\"GET\", headers={\"Host\": host,\
+              \ \"User-Agent\": \"mlflow-readiness-probe/1.0\"})\ntry:\n    with urlopen(req, timeout=5) as resp:\n      \
+              \  if 200 <= getattr(resp, 'status', 200) < 400:\n            sys.exit(0)\nexcept Exception:\n    pass\nsys.exit(1)\n\
+              PY"
+          timeoutSeconds: 6
           periodSeconds: 5
-          failureThreshold: 12
+          failureThreshold: 6
           successThreshold: 1
         livenessProbe:
           tcpSocket:
             port: http
           timeoutSeconds: 1
           periodSeconds: 20
-          failureThreshold: 3
+          failureThreshold: 6
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001

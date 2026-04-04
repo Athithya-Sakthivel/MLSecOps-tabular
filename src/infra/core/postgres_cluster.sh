@@ -28,7 +28,7 @@ SECRET_TIMEOUT="${SECRET_TIMEOUT:-180}"
 STORAGE_CLASS_NAME="${STORAGE_CLASS_NAME:-default-storage-class}"
 
 INITDB_DB="${INITDB_DB:-flyte_admin}"
-ADDITIONAL_DBS=(datacatalog mlflow)
+ADDITIONAL_DBS=(datacatalog mlflow iceberg)
 ALL_DBS=("${INITDB_DB}" "${ADDITIONAL_DBS[@]}")
 
 # Resource Profiles

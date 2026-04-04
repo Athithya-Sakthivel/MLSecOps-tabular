@@ -1,4 +1,3 @@
-# src/workflows/ELT/run.py
 from __future__ import annotations
 
 import argparse
@@ -27,9 +26,9 @@ ELT_ROOT = SRC_ROOT / "workflows" / "ELT"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-REMOTE_PROJECT = os.environ.get("REMOTE_PROJECT", "flytesnacks")
-REMOTE_DOMAIN = os.environ.get("REMOTE_DOMAIN", "development")
-TASK_NAMESPACE = os.environ.get("TASK_NAMESPACE", f"{REMOTE_PROJECT}-{REMOTE_DOMAIN}")
+REMOTE_PROJECT = os.environ.get("REMOTE_PROJECT", "flytesnacks").strip()
+REMOTE_DOMAIN = os.environ.get("REMOTE_DOMAIN", "development").strip()
+TASK_NAMESPACE = os.environ.get("TASK_NAMESPACE", f"{REMOTE_PROJECT}-{REMOTE_DOMAIN}").strip()
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
 ELT_PROFILE = (
@@ -56,12 +55,9 @@ FLYTE_ADMIN_NAMESPACE = os.environ.get("FLYTE_ADMIN_NAMESPACE", "flyte")
 FLYTE_ADMIN_HOST = os.environ.get("FLYTE_ADMIN_HOST", "127.0.0.1")
 FLYTE_ADMIN_PORT = int(os.environ.get("FLYTE_ADMIN_PORT", "30081"))
 PORT_FORWARD_TARGET_PORT = int(os.environ.get("PORT_FORWARD_TARGET_PORT", "81"))
-PORT_FORWARD_PID_FILE = Path(os.environ.get("PORT_FORWARD_PID_FILE", "/tmp/flyteadmin-portforward.pid"))
 PORT_FORWARD_LOG = Path(os.environ.get("PORT_FORWARD_LOG", "/tmp/flyteadmin-portforward.log"))
 
-PORT_FORWARD_PROC: subprocess.Popen[str] | None = None
-
-ACTIVATE_LAUNCHPLANS = os.environ.get("ACTIVATE_LAUNCHPLANS", "0").lower() in {
+ACTIVATE_SCHEDULED_LAUNCHPLANS = os.environ.get("ACTIVATE_SCHEDULED_LAUNCHPLANS", "1").lower() in {
     "1",
     "true",
     "yes",
@@ -105,6 +101,7 @@ LAUNCH_PLAN_COMMANDS: dict[str, tuple[str, ...]] = {
         "ICEBERG_MAINTENANCE_WEEKLY_LP",
     ),
 }
+EXECUTION_COMMANDS = tuple(LAUNCH_PLAN_COMMANDS.keys())
 
 
 def log(msg: str) -> None:
@@ -150,37 +147,36 @@ def run_cmd(
     return cp
 
 
+def port_is_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+PORT_FORWARD_PROC: subprocess.Popen[str] | None = None
+
+
 def stop_port_forward_if_any() -> None:
     global PORT_FORWARD_PROC
 
     proc = PORT_FORWARD_PROC
     PORT_FORWARD_PROC = None
 
-    pid: int | None = None
-    if PORT_FORWARD_PID_FILE.is_file():
-        try:
-            pid = int(PORT_FORWARD_PID_FILE.read_text().strip())
-        except Exception:
-            pid = None
+    if proc is None:
+        return
 
-    if proc is not None:
+    if proc.poll() is None:
         with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
+            os.killpg(proc.pid, signal.SIGTERM)
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+                os.killpg(proc.pid, signal.SIGKILL)
             with contextlib.suppress(Exception):
                 proc.wait(timeout=10)
-
-    if pid is not None and (proc is None or proc.pid != pid):
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
-        with contextlib.suppress(Exception):
-            os.waitpid(pid, 0)
-
-    PORT_FORWARD_PID_FILE.unlink(missing_ok=True)
 
 
 def cleanup() -> None:
@@ -189,14 +185,6 @@ def cleanup() -> None:
 
 
 atexit.register(cleanup)
-
-
-def port_is_open(host: str, port: int) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except OSError:
-        return False
 
 
 def start_port_forward() -> None:
@@ -219,8 +207,7 @@ def start_port_forward() -> None:
         f"{FLYTE_ADMIN_NAMESPACE}/svc/flyteadmin:{PORT_FORWARD_TARGET_PORT}"
     )
 
-    log_file = PORT_FORWARD_LOG.open("w", encoding="utf-8")
-    try:
+    with PORT_FORWARD_LOG.open("w", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
             [
                 "kubectl",
@@ -237,13 +224,11 @@ def start_port_forward() -> None:
             close_fds=True,
             start_new_session=True,
         )
-    finally:
-        log_file.close()
 
     PORT_FORWARD_PROC = proc
-    PORT_FORWARD_PID_FILE.write_text(str(proc.pid))
 
-    for _ in range(60):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         if port_is_open(FLYTE_ADMIN_HOST, FLYTE_ADMIN_PORT):
             return
         if proc.poll() is not None:
@@ -253,8 +238,11 @@ def start_port_forward() -> None:
     tail = ""
     if PORT_FORWARD_LOG.is_file():
         try:
-            tail_lines = PORT_FORWARD_LOG.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
-            tail = "\n".join(tail_lines)
+            tail = "\n".join(
+                PORT_FORWARD_LOG.read_text(encoding="utf-8", errors="replace")
+                .strip()
+                .splitlines()[-20:]
+            )
         except Exception:
             tail = ""
     stop_port_forward_if_any()
@@ -505,13 +493,11 @@ def ensure_namespace_bootstrap_ready() -> None:
 
 
 def registration_tree_files() -> list[Path]:
-    files: list[Path] = [
-        SRC_ROOT / "workflows" / "ELT" / "launch_plans.py",
-        SRC_ROOT / "workflows" / "ELT" / "workflows" / "elt_workflow.py",
+    return [
+        path
+        for path in sorted(ELT_ROOT.rglob("*.py"))
+        if "__pycache__" not in path.parts and path.is_file()
     ]
-    tasks_dir = SRC_ROOT / "workflows" / "ELT" / "tasks"
-    files.extend(sorted(tasks_dir.glob("*.py")))
-    return [path for path in files if path.is_file()]
 
 
 @functools.lru_cache(maxsize=1)
@@ -574,9 +560,6 @@ def build_register_command(registration_version: str) -> list[str]:
     if PYFLYTE_REGISTER_EXTRA_ARGS:
         cmd.extend(shlex.split(PYFLYTE_REGISTER_EXTRA_ARGS))
 
-    if ACTIVATE_LAUNCHPLANS:
-        cmd.append("--activate-launchplans")
-
     cmd.append(str(WORKFLOW_SOURCE_REL))
     return cmd
 
@@ -619,7 +602,7 @@ def register_entities() -> str:
     cmd = build_register_command(registration_version)
     run_cmd(cmd, cwd=SRC_ROOT, env=register_env)
 
-    if ACTIVATE_LAUNCHPLANS:
+    if ACTIVATE_SCHEDULED_LAUNCHPLANS:
         _activate_launch_plan("iceberg_maintenance_daily_lp", registration_version)
         _activate_launch_plan("iceberg_maintenance_weekly_lp", registration_version)
 
@@ -633,7 +616,58 @@ def _resolve_launch_plan_name(command: str) -> str:
     return _module_attr_name(mod, candidates)
 
 
-def execute_launch_plan(command: str, *, latest: bool | None = None, version: str | None = None) -> None:
+def fetch_launch_plan_exec_spec(
+    launch_plan_name: str,
+    exec_spec_file: Path,
+    *,
+    latest: bool,
+    version: str | None,
+) -> None:
+    exec_spec_file.unlink(missing_ok=True)
+
+    args = [
+        "flytectl",
+        "get",
+        "launchplan",
+        "-p",
+        REMOTE_PROJECT,
+        "-d",
+        REMOTE_DOMAIN,
+        launch_plan_name,
+    ]
+    if latest:
+        args.append("--latest")
+    else:
+        if not version:
+            fatal("launch-plan version required when latest is disabled")
+        args.extend(["--version", version])
+    args.extend(["--execFile", str(exec_spec_file)])
+    run_cmd(args)
+
+
+def create_execution_from_spec(exec_spec_file: Path) -> None:
+    run_cmd(
+        [
+            "flytectl",
+            "create",
+            "execution",
+            "-p",
+            REMOTE_PROJECT,
+            "-d",
+            REMOTE_DOMAIN,
+            "--execFile",
+            str(exec_spec_file),
+        ]
+    )
+
+
+def execute_launch_plan(
+    command: str,
+    *,
+    force_immediate_run: bool = False,
+    latest: bool | None = None,
+    version: str | None = None,
+) -> None:
     require_bin("kubectl")
     require_bin("flytectl")
 
@@ -645,46 +679,24 @@ def execute_launch_plan(command: str, *, latest: bool | None = None, version: st
     effective_latest = USE_LATEST if latest is None else latest
     effective_version = version if version is not None else (None if effective_latest else compute_registration_version())
 
-    if not effective_latest and not effective_version:
-        fatal("launch-plan version required when latest is disabled")
+    if force_immediate_run:
+        log(f"Force immediate run requested for {launch_plan_name}")
+    else:
+        log(f"Immediate execution for {launch_plan_name}")
 
     with tempfile.TemporaryDirectory(prefix=f"{launch_plan_name}.") as tmpdir:
         exec_spec_file = Path(tmpdir) / "exec.yaml"
 
-        log(f"Launching: {launch_plan_name}")
-
-        get_args = [
-            "flytectl",
-            "get",
-            "launchplan",
-            "-p",
-            REMOTE_PROJECT,
-            "-d",
-            REMOTE_DOMAIN,
+        log(f"Fetching launch plan: {launch_plan_name}")
+        fetch_launch_plan_exec_spec(
             launch_plan_name,
-        ]
-        if effective_latest:
-            get_args.append("--latest")
-        else:
-            get_args.extend(["--version", effective_version])
-        get_args.extend(["--execFile", str(exec_spec_file)])
-
-        run_cmd(get_args)
+            exec_spec_file,
+            latest=effective_latest,
+            version=effective_version,
+        )
 
         log(f"Creating execution from {exec_spec_file}")
-        run_cmd(
-            [
-                "flytectl",
-                "create",
-                "execution",
-                "-p",
-                REMOTE_PROJECT,
-                "-d",
-                REMOTE_DOMAIN,
-                "--execFile",
-                str(exec_spec_file),
-            ]
-        )
+        create_execution_from_spec(exec_spec_file)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -692,11 +704,33 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("register", help="Register ELT workflows and launch plans")
-    sub.add_parser("elt_workflow", help="Execute the ELT workflow launch plan")
-    sub.add_parser("iceberg_maintenance_daily_lp", help="Execute the daily Iceberg maintenance launch plan")
-    sub.add_parser("iceberg_maintenance_weekly_lp", help="Execute the weekly Iceberg maintenance launch plan")
-    sub.add_parser("iceberg_maintenance_workflow", help="Alias for the weekly Iceberg maintenance launch plan")
 
+    def add_launch_plan_command(name: str, help_text: str) -> None:
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument(
+            "--force-immediate-run",
+            action="store_true",
+            help="Explicitly run now; launch plans already execute immediately with flytectl.",
+        )
+        p.add_argument(
+            "--latest",
+            action="store_true",
+            help="Fetch the latest registered launch plan version instead of the local version hash.",
+        )
+        p.add_argument(
+            "--version",
+            type=str,
+            default=None,
+            help="Fetch a specific launch plan version.",
+        )
+
+    add_launch_plan_command("elt_workflow", "Execute the ELT workflow launch plan")
+    add_launch_plan_command("iceberg_maintenance_daily_lp", "Execute the daily Iceberg maintenance launch plan")
+    add_launch_plan_command("iceberg_maintenance_weekly_lp", "Execute the weekly Iceberg maintenance launch plan")
+    add_launch_plan_command(
+        "iceberg_maintenance_workflow",
+        "Alias for the weekly Iceberg maintenance launch plan",
+    )
     return parser
 
 
@@ -716,11 +750,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         register_entities()
         return 0
 
-    if args.command in LAUNCH_PLAN_COMMANDS:
-        execute_launch_plan(command=args.command)
+    if args.command in EXECUTION_COMMANDS:
+        execute_launch_plan(
+            args.command,
+            force_immediate_run=getattr(args, "force_immediate_run", False),
+            latest=getattr(args, "latest", None),
+            version=getattr(args, "version", None),
+        )
         return 0
 
-    return 1
+    fatal(f"unknown command: {args.command}")
 
 
 if __name__ == "__main__":

@@ -42,16 +42,26 @@ SERVICE_ACCOUNT_NAME = os.environ.get("SERVICE_ACCOUNT_NAME", MLFLOW_NAME)
 MLFLOW_PORT = int(os.environ.get("MLFLOW_PORT", "5000"))
 MLFLOW_IMAGE = os.environ.get(
     "MLFLOW_IMAGE",
-    "ghcr.io/athithya-sakthivel/mlflow:2026-04-03-08-10--22db809@sha256:5a8ae55baa1aaed0411e90c4c3bd5c9564b47e5cc8f315e16804cdbf2835f7d2",
+    "ghcr.io/athithya-sakthivel/mlflow:2026-04-03-20-21--861d47a@sha256:9bb811f9af11963e9eecd331cc05fe8dd7a9f683216ec1a36453643fe85e55d7",
 ).strip()
 
 MLFLOW_WORKERS = int(os.environ.get("MLFLOW_WORKERS", "1"))
 MLFLOW_SECRETS_CACHE_TTL = int(os.environ.get("MLFLOW_SECRETS_CACHE_TTL", "30"))
 MLFLOW_SECRETS_CACHE_MAX_SIZE = int(os.environ.get("MLFLOW_SECRETS_CACHE_MAX_SIZE", "128"))
+
 MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE = os.environ.get(
     "MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE",
-    "true",
+    "false",
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+MLFLOW_SERVER_ENABLE_JOB_EXECUTION = os.environ.get(
+    "MLFLOW_SERVER_ENABLE_JOB_EXECUTION",
+    "false",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+MLFLOW_SERVER_ALLOWED_HOSTS = os.environ.get("MLFLOW_SERVER_ALLOWED_HOSTS", "").strip()
+MLFLOW_SERVER_CORS_ALLOWED_ORIGINS = os.environ.get("MLFLOW_SERVER_CORS_ALLOWED_ORIGINS", "").strip()
+MLFLOW_SERVER_X_FRAME_OPTIONS = os.environ.get("MLFLOW_SERVER_X_FRAME_OPTIONS", "SAMEORIGIN").strip().upper()
 
 READY_TIMEOUT = int(os.environ.get("READY_TIMEOUT", "1200"))
 HTTP_READY_TIMEOUT = int(os.environ.get("HTTP_READY_TIMEOUT", "300"))
@@ -84,17 +94,18 @@ APP_DB_PASSWORD = ""
 RESOLVED_DB_PORT = ""
 
 if K8S_CLUSTER == "kind":
-    MLFLOW_REPLICAS = 1
     MLFLOW_CPU_REQUEST = "200m"
     MLFLOW_CPU_LIMIT = "800m"
     MLFLOW_MEM_REQUEST = "512Mi"
     MLFLOW_MEM_LIMIT = "1Gi"
 else:
-    MLFLOW_REPLICAS = 1
     MLFLOW_CPU_REQUEST = "500m"
     MLFLOW_CPU_LIMIT = "1500m"
     MLFLOW_MEM_REQUEST = "1Gi"
     MLFLOW_MEM_LIMIT = "1.5Gi"
+
+MLFLOW_REPLICAS = int(os.environ.get("MLFLOW_REPLICAS", "1"))
+MLFLOW_MIN_READY_SECONDS = int(os.environ.get("MLFLOW_MIN_READY_SECONDS", "10"))
 
 
 def ts() -> str:
@@ -263,6 +274,35 @@ def resolve_db_host() -> str:
     return DB_HOST
 
 
+def resolve_allowed_hosts() -> str:
+    global MLFLOW_SERVER_ALLOWED_HOSTS
+    if MLFLOW_SERVER_ALLOWED_HOSTS:
+        return MLFLOW_SERVER_ALLOWED_HOSTS
+
+    service_fqdn = f"{MLFLOW_SERVICE}.{TARGET_NS}.svc.cluster.local"
+    service_short = f"{MLFLOW_SERVICE}.{TARGET_NS}.svc"
+    MLFLOW_SERVER_ALLOWED_HOSTS = ",".join(
+        [
+            "localhost:*",
+            "127.0.0.1:*",
+            "[::1]:*",
+            MLFLOW_SERVICE,
+            f"{MLFLOW_SERVICE}:{MLFLOW_PORT}",
+            service_short,
+            f"{service_short}:{MLFLOW_PORT}",
+            service_fqdn,
+            f"{service_fqdn}:{MLFLOW_PORT}",
+        ]
+    )
+    return MLFLOW_SERVER_ALLOWED_HOSTS
+
+
+def validate_x_frame_options() -> str:
+    if MLFLOW_SERVER_X_FRAME_OPTIONS not in {"SAMEORIGIN", "DENY", "NONE"}:
+        fatal("MLFLOW_SERVER_X_FRAME_OPTIONS must be one of SAMEORIGIN, DENY, or NONE")
+    return MLFLOW_SERVER_X_FRAME_OPTIONS
+
+
 def artifact_destination() -> str:
     if not MLFLOW_S3_BUCKET:
         fatal("MLFLOW_S3_BUCKET is required; local fallback has been removed")
@@ -334,12 +374,21 @@ def build_common_env() -> list[dict[str, Any]]:
             "name": "MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE",
             "value": "true" if MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE else "false",
         },
+        {
+            "name": "MLFLOW_SERVER_ENABLE_JOB_EXECUTION",
+            "value": "true" if MLFLOW_SERVER_ENABLE_JOB_EXECUTION else "false",
+        },
+        {"name": "MLFLOW_SERVER_ALLOWED_HOSTS", "value": resolve_allowed_hosts()},
+        {"name": "MLFLOW_SERVER_X_FRAME_OPTIONS", "value": validate_x_frame_options()},
         {"name": "AWS_REGION", "value": AWS_REGION},
         {"name": "AWS_DEFAULT_REGION", "value": AWS_REGION},
         {"name": "HOME", "value": "/tmp"},
         {"name": "TMPDIR", "value": "/tmp"},
         {"name": "XDG_CACHE_HOME", "value": "/tmp/.cache"},
     ]
+
+    if MLFLOW_SERVER_CORS_ALLOWED_ORIGINS:
+        env.append({"name": "MLFLOW_SERVER_CORS_ALLOWED_ORIGINS", "value": MLFLOW_SERVER_CORS_ALLOWED_ORIGINS})
 
     if MLFLOW_S3_BUCKET:
         env.append({"name": "MLFLOW_S3_BUCKET", "value": MLFLOW_S3_BUCKET})
@@ -388,8 +437,43 @@ def build_common_env() -> list[dict[str, Any]]:
     return env
 
 
+def server_cli_args() -> list[str]:
+    args = [
+        '--host 0.0.0.0',
+        '--port "${MLFLOW_PORT}"',
+    ]
+
+    if MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE:
+        args.append('--disable-security-middleware')
+
+    args.append('--allowed-hosts "${MLFLOW_SERVER_ALLOWED_HOSTS}"')
+
+    if MLFLOW_SERVER_CORS_ALLOWED_ORIGINS:
+        args.append('--cors-allowed-origins "${MLFLOW_SERVER_CORS_ALLOWED_ORIGINS}"')
+
+    args.extend(
+        [
+            '--x-frame-options "${MLFLOW_SERVER_X_FRAME_OPTIONS}"',
+            '--backend-store-uri "${BACKEND_URI}"',
+            '--registry-store-uri "${BACKEND_URI}"',
+            '--artifacts-destination "${MLFLOW_ARTIFACTS_DESTINATION}"',
+            '--serve-artifacts',
+            '--workers "${MLFLOW_WORKERS}"',
+            '--secrets-cache-ttl "${MLFLOW_SECRETS_CACHE_TTL}"',
+            '--secrets-cache-max-size "${MLFLOW_SECRETS_CACHE_MAX_SIZE}"',
+        ]
+    )
+    return args
+
+
 def server_script() -> str:
-    disable_flag = "--disable-security-middleware" if MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE else ""
+    cli_args = server_cli_args()
+    cli_lines = ["exec mlflow server \\"]
+    for idx, arg in enumerate(cli_args):
+        suffix = " \\" if idx < len(cli_args) - 1 else ""
+        cli_lines.append(f"  {arg}{suffix}")
+    cli_block = "\n".join(cli_lines)
+
     return rf'''set -eu
 echo "[mlflow][server] starting" >&2
 echo "[mlflow][server] python3=$(python3 --version 2>&1)" >&2
@@ -398,6 +482,9 @@ echo "[mlflow][server] backend=${{DB_HOST}}:${{DB_PORT}}/${{DB_NAME}}" >&2
 echo "[mlflow][server] artifacts=${{MLFLOW_ARTIFACTS_DESTINATION}}" >&2
 echo "[mlflow][server] workers=${{MLFLOW_WORKERS}}" >&2
 echo "[mlflow][server] disable_security_middleware=${{MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE}}" >&2
+echo "[mlflow][server] enable_job_execution=${{MLFLOW_SERVER_ENABLE_JOB_EXECUTION}}" >&2
+echo "[mlflow][server] allowed_hosts=${{MLFLOW_SERVER_ALLOWED_HOSTS}}" >&2
+echo "[mlflow][server] x_frame_options=${{MLFLOW_SERVER_X_FRAME_OPTIONS}}" >&2
 echo "[mlflow][server] secrets_cache_ttl=${{MLFLOW_SECRETS_CACHE_TTL}}" >&2
 echo "[mlflow][server] secrets_cache_max_size=${{MLFLOW_SECRETS_CACHE_MAX_SIZE}}" >&2
 BACKEND_URI="$(python3 - <<'PY'
@@ -419,17 +506,7 @@ print(
 PY
 )"
 echo "[mlflow][server] backend_uri=postgresql://${{DB_USER}}:*****@${{DB_HOST}}:${{DB_PORT}}/${{DB_NAME}}" >&2
-exec mlflow server \
-  --host 0.0.0.0 \
-  --port "${{MLFLOW_PORT}}" \
-  {disable_flag} \
-  --backend-store-uri "${{BACKEND_URI}}" \
-  --registry-store-uri "${{BACKEND_URI}}" \
-  --artifacts-destination "${{MLFLOW_ARTIFACTS_DESTINATION}}" \
-  --serve-artifacts \
-  --workers "${{MLFLOW_WORKERS}}" \
-  --secrets-cache-ttl "${{MLFLOW_SECRETS_CACHE_TTL}}" \
-  --secrets-cache-max-size "${{MLFLOW_SECRETS_CACHE_MAX_SIZE}}"
+{cli_block}
 '''
 
 
@@ -464,11 +541,29 @@ def startup_probe() -> dict[str, Any]:
 
 
 def readiness_probe() -> dict[str, Any]:
+    script = "\n".join(
+        [
+            "python3 - <<'PY'",
+            "import sys",
+            "from urllib.request import Request, urlopen",
+            f'url = "http://127.0.0.1:{MLFLOW_PORT}/"',
+            f'host = "{MLFLOW_SERVICE}.{TARGET_NS}.svc.cluster.local:{MLFLOW_PORT}"',
+            'req = Request(url, method="GET", headers={"Host": host, "User-Agent": "mlflow-readiness-probe/1.0"})',
+            "try:",
+            "    with urlopen(req, timeout=5) as resp:",
+            "        if 200 <= getattr(resp, 'status', 200) < 400:",
+            "            sys.exit(0)",
+            "except Exception:",
+            "    pass",
+            "sys.exit(1)",
+            "PY",
+        ]
+    )
     return {
-        "httpGet": {"path": "/", "port": "http", "scheme": "HTTP"},
-        "timeoutSeconds": 10,
+        "exec": {"command": ["/bin/sh", "-lc", script]},
+        "timeoutSeconds": 6,
         "periodSeconds": 5,
-        "failureThreshold": 12,
+        "failureThreshold": 6,
         "successThreshold": 1,
     }
 
@@ -478,8 +573,30 @@ def liveness_probe() -> dict[str, Any]:
         "tcpSocket": {"port": "http"},
         "timeoutSeconds": 1,
         "periodSeconds": 20,
-        "failureThreshold": 3,
+        "failureThreshold": 6,
     }
+
+
+def service_labels() -> dict[str, str]:
+    return {
+        "app.kubernetes.io/name": MLFLOW_NAME,
+        "app.kubernetes.io/component": "server",
+    }
+
+
+def pod_template_labels() -> dict[str, str]:
+    return service_labels()
+
+
+def topology_spread_constraints() -> list[dict[str, Any]]:
+    return [
+        {
+            "maxSkew": 1,
+            "topologyKey": "kubernetes.io/hostname",
+            "whenUnsatisfiable": "ScheduleAnyway",
+            "labelSelector": {"matchLabels": pod_template_labels()},
+        }
+    ]
 
 
 def deployment_manifest() -> dict[str, Any]:
@@ -495,8 +612,13 @@ def deployment_manifest() -> dict[str, Any]:
         "image": MLFLOW_IMAGE,
         "access_mode": DB_ACCESS_MODE,
         "replicas": MLFLOW_REPLICAS,
+        "min_ready_seconds": MLFLOW_MIN_READY_SECONDS,
         "workers": MLFLOW_WORKERS,
         "security_middleware_disabled": MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE,
+        "job_execution_enabled": MLFLOW_SERVER_ENABLE_JOB_EXECUTION,
+        "allowed_hosts": resolve_allowed_hosts(),
+        "cors_allowed_origins": MLFLOW_SERVER_CORS_ALLOWED_ORIGINS,
+        "x_frame_options": validate_x_frame_options(),
         "secrets_cache_ttl": MLFLOW_SECRETS_CACHE_TTL,
         "secrets_cache_max_size": MLFLOW_SECRETS_CACHE_MAX_SIZE,
         "cpu_request": MLFLOW_CPU_REQUEST,
@@ -519,24 +641,26 @@ def deployment_manifest() -> dict[str, Any]:
         },
         "spec": {
             "replicas": MLFLOW_REPLICAS,
-            "strategy": {"type": "Recreate"},
+            "minReadySeconds": MLFLOW_MIN_READY_SECONDS,
+            "strategy": {
+                "type": "RollingUpdate",
+                "rollingUpdate": {
+                    "maxUnavailable": 0,
+                    "maxSurge": 1,
+                },
+            },
             "selector": {
-                "matchLabels": {
-                    "app.kubernetes.io/name": MLFLOW_NAME,
-                    "app.kubernetes.io/component": "server",
-                }
+                "matchLabels": pod_template_labels(),
             },
             "template": {
                 "metadata": {
-                    "labels": {
-                        "app.kubernetes.io/name": MLFLOW_NAME,
-                        "app.kubernetes.io/component": "server",
-                    },
+                    "labels": pod_template_labels(),
                     "annotations": {"mlflow.io/config-checksum": checksum},
                 },
                 "spec": {
                     "serviceAccountName": SERVICE_ACCOUNT_NAME,
                     "securityContext": base_pod_security_context(),
+                    "topologySpreadConstraints": topology_spread_constraints(),
                     "containers": [
                         {
                             "name": "mlflow",
@@ -571,6 +695,24 @@ def deployment_manifest() -> dict[str, Any]:
     }
 
 
+def pdb_manifest() -> dict[str, Any]:
+    return {
+        "apiVersion": "policy/v1",
+        "kind": "PodDisruptionBudget",
+        "metadata": {
+            "name": f"{MLFLOW_NAME}-pdb",
+            "namespace": TARGET_NS,
+            "labels": {"app.kubernetes.io/name": MLFLOW_NAME},
+        },
+        "spec": {
+            "minAvailable": 1,
+            "selector": {
+                "matchLabels": pod_template_labels(),
+            },
+        },
+    }
+
+
 def service_manifest() -> dict[str, Any]:
     return {
         "apiVersion": "v1",
@@ -582,10 +724,7 @@ def service_manifest() -> dict[str, Any]:
         },
         "spec": {
             "type": "ClusterIP",
-            "selector": {
-                "app.kubernetes.io/name": MLFLOW_NAME,
-                "app.kubernetes.io/component": "server",
-            },
+            "selector": pod_template_labels(),
             "ports": [
                 {
                     "name": "http",
@@ -695,6 +834,7 @@ def dump_debug_state() -> None:
         ["kubectl", "-n", TARGET_NS, "get", "svc", "-o", "wide"],
         ["kubectl", "-n", TARGET_NS, "get", "deploy", MLFLOW_NAME, "-o", "wide"],
         ["kubectl", "-n", TARGET_NS, "describe", "deploy", MLFLOW_NAME],
+        ["kubectl", "-n", TARGET_NS, "get", "pdb", "-o", "wide"],
         ["kubectl", "-n", TARGET_NS, "get", "rs", "-o", "wide"],
         ["kubectl", "-n", TARGET_NS, "get", "events", "--sort-by=.lastTimestamp"],
         ["kubectl", "-n", TARGET_NS, "logs", f"deployment/{MLFLOW_NAME}", "--all-containers=true", "--tail=200"],
@@ -714,9 +854,15 @@ def print_summary() -> None:
     print(f"Artifact destination: {artifact_destination()}")
     print(f"DB access mode: {DB_ACCESS_MODE}")
     print(f"Resource profile: {K8S_CLUSTER}")
+    print(f"Replicas: {MLFLOW_REPLICAS}")
     print(f"MLFLOW_IMAGE: {MLFLOW_IMAGE}")
     print(f"Workers: {MLFLOW_WORKERS}")
     print(f"Security middleware disabled: {MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE}")
+    print(f"Job execution enabled: {MLFLOW_SERVER_ENABLE_JOB_EXECUTION}")
+    print(f"Allowed hosts: {resolve_allowed_hosts()}")
+    print(f"X-Frame-Options: {validate_x_frame_options()}")
+    if MLFLOW_SERVER_CORS_ALLOWED_ORIGINS:
+        print(f"CORS allowed origins: {MLFLOW_SERVER_CORS_ALLOWED_ORIGINS}")
     print(f"Secrets cache TTL: {MLFLOW_SECRETS_CACHE_TTL}")
     print(f"Secrets cache max size: {MLFLOW_SECRETS_CACHE_MAX_SIZE}")
     print()
@@ -759,6 +905,12 @@ def main() -> None:
     if not MLFLOW_USE_IAM and (not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY):
         fatal("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required when MLFLOW_USE_IAM=false")
 
+    if MLFLOW_REPLICAS > 1 and MLFLOW_SERVER_ENABLE_JOB_EXECUTION:
+        fatal("MLFLOW_SERVER_ENABLE_JOB_EXECUTION must be false when MLFLOW_REPLICAS > 1")
+
+    resolve_allowed_hosts()
+    validate_x_frame_options()
+
     ensure_namespace(TARGET_NS)
 
     log("resolving postgres credentials from cnpg secret")
@@ -774,6 +926,7 @@ def main() -> None:
 
     log("rendering manifests")
     apply_manifest(service_manifest(), "service.yaml")
+    apply_manifest(pdb_manifest(), "pdb.yaml")
     apply_manifest(deployment_manifest(), "deployment.yaml")
 
     wait_for_rollout(MLFLOW_NAME)
@@ -786,6 +939,7 @@ def delete_all() -> None:
     log("deleting mlflow resources")
     run_live(["kubectl", "-n", TARGET_NS, "delete", "deployment", MLFLOW_NAME, "--ignore-not-found"])
     run_live(["kubectl", "-n", TARGET_NS, "delete", "service", MLFLOW_SERVICE, "--ignore-not-found"])
+    run_live(["kubectl", "-n", TARGET_NS, "delete", "poddisruptionbudget", f"{MLFLOW_NAME}-pdb", "--ignore-not-found"])
     run_live(["kubectl", "-n", TARGET_NS, "delete", "secret", DB_AUTH_SECRET_NAME, "--ignore-not-found"])
     run_live(["kubectl", "-n", TARGET_NS, "delete", "secret", S3_AUTH_SECRET_NAME, "--ignore-not-found"])
     run_live(["kubectl", "-n", TARGET_NS, "delete", "serviceaccount", SERVICE_ACCOUNT_NAME, "--ignore-not-found"])
@@ -805,8 +959,10 @@ def cli() -> int:
                 "Usage: mlflow_server.py [--rollout|--delete]\n\n"
                 "Defaults:\n"
                 "  MLFLOW_S3_BUCKET=e2e-mlops-data-681802563986\n"
-                "  MLFLOW_IMAGE=ghcr.io/athithya-sakthivel/mlflow:2026-04-03-08-10--22db809@sha256:5a8ae55baa1aaed0411e90c4c3bd5c9564b47e5cc8f315e16804cdbf2835f7d2\n\n"
+                "  MLFLOW_IMAGE=ghcr.io/athithya-sakthivel/mlflow:2026-04-03-20-21--861d47a@sha256:9bb811f9af11963e9eecd331cc05fe8dd7a9f683216ec1a36453643fe85e55d7\n\n"
                 "Useful env:\n"
+                "  MLFLOW_REPLICAS=2\n"
+                "  MLFLOW_MIN_READY_SECONDS=10\n"
                 "  K8S_CLUSTER=kind|other\n"
                 "  MLFLOW_USE_IAM=true|false\n"
                 "  AWS_ROLE_ARN=arn:aws:iam::... (required when MLFLOW_USE_IAM=true)\n"
@@ -817,7 +973,11 @@ def cli() -> int:
                 "  MLFLOW_WORKERS=1\n"
                 "  MLFLOW_SECRETS_CACHE_TTL=30\n"
                 "  MLFLOW_SECRETS_CACHE_MAX_SIZE=128\n"
-                "  MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=true\n"
+                "  MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=false\n"
+                "  MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false\n"
+                "  MLFLOW_SERVER_ALLOWED_HOSTS=auto\n"
+                "  MLFLOW_SERVER_CORS_ALLOWED_ORIGINS=<optional>\n"
+                "  MLFLOW_SERVER_X_FRAME_OPTIONS=SAMEORIGIN|DENY|NONE\n"
             )
             return 0
         fatal(f"unknown option: {sys.argv[1]}")

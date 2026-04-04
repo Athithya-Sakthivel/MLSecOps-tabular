@@ -15,7 +15,9 @@ SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-iceberg-rest-sa}"
 SECRET_NAME="${SECRET_NAME:-iceberg-storage-credentials}"
 ANNOTATION_KEY="${ANNOTATION_KEY:-mlsecops.iceberg.checksum}"
 
-IMAGE="${IMAGE:-apache/iceberg-rest-fixture:1.10.1@sha256:f7d679d30ac9c640bdeb2c015dff533cd3c8f1c7d491ebcb5d436f9a42db1d6f}"
+# Pinned working image that already includes the PostgreSQL JDBC driver.
+IMAGE="${IMAGE:-ghcr.io/athithya-sakthivel/iceberg-rest:2026-04-03-20-08--861d47a@sha256:0fde6e09b4dd16c0f08165517a604d59dc0538d1b868275a46c1bf5d9b5f1bcc}"
+
 CONTAINER_PORT="${CONTAINER_PORT:-8181}"
 SERVICE_PORT="${SERVICE_PORT:-8181}"
 
@@ -27,6 +29,15 @@ S3_PATH_STYLE_ACCESS="${S3_PATH_STYLE_ACCESS:-false}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
+
+# PostgreSQL / CNPG defaults
+POSTGRES_NAMESPACE="${POSTGRES_NAMESPACE:-default}"
+POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres-pooler}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+POSTGRES_DB="${POSTGRES_DB:-iceberg}"
+POSTGRES_SECRET_NAME="${POSTGRES_SECRET_NAME:-postgres-cluster-app}"
+POSTGRES_USERNAME_KEY="${POSTGRES_USERNAME_KEY:-username}"
+POSTGRES_PASSWORD_KEY="${POSTGRES_PASSWORD_KEY:-password}"
 
 READY_TIMEOUT="${READY_TIMEOUT:-300}"
 VALIDATE_SCRIPT="${VALIDATE_SCRIPT:-src/tests/elt/iceberg_server_validate.sh}"
@@ -104,6 +115,11 @@ normalized_s3_endpoint() {
   trim_trailing_slash "${endpoint}"
 }
 
+postgres_jdbc_uri() {
+  printf 'jdbc:postgresql://%s.%s.svc.cluster.local:%s/%s' \
+    "${POSTGRES_SERVICE}" "${POSTGRES_NAMESPACE}" "${POSTGRES_PORT}" "${POSTGRES_DB}"
+}
+
 secret_fingerprint() {
   python3 - <<'PY'
 import hashlib
@@ -125,6 +141,25 @@ for part in parts:
     h.update(b"\0")
 print(h.hexdigest())
 PY
+}
+
+postgres_secret_fingerprint() {
+  kubectl -n "${POSTGRES_NAMESPACE}" get secret "${POSTGRES_SECRET_NAME}" \
+    -o "jsonpath={.data.${POSTGRES_USERNAME_KEY}}{.data.${POSTGRES_PASSWORD_KEY}}" 2>/dev/null \
+    | sha256sum | awk '{print $1}'
+}
+
+require_postgres_secret() {
+  if ! kubectl -n "${POSTGRES_NAMESPACE}" get secret "${POSTGRES_SECRET_NAME}" >/dev/null 2>&1; then
+    fatal "missing Postgres secret ${POSTGRES_SECRET_NAME} in namespace ${POSTGRES_NAMESPACE}"
+  fi
+
+  local username_b64 password_b64
+  username_b64="$(kubectl -n "${POSTGRES_NAMESPACE}" get secret "${POSTGRES_SECRET_NAME}" -o "jsonpath={.data.${POSTGRES_USERNAME_KEY}}" 2>/dev/null || true)"
+  password_b64="$(kubectl -n "${POSTGRES_NAMESPACE}" get secret "${POSTGRES_SECRET_NAME}" -o "jsonpath={.data.${POSTGRES_PASSWORD_KEY}}" 2>/dev/null || true)"
+
+  [[ -n "${username_b64}" ]] || fatal "secret ${POSTGRES_SECRET_NAME} missing key ${POSTGRES_USERNAME_KEY}"
+  [[ -n "${password_b64}" ]] || fatal "secret ${POSTGRES_SECRET_NAME} missing key ${POSTGRES_PASSWORD_KEY}"
 }
 
 # --- K8s Resource Management --------------------------------------------------
@@ -165,9 +200,10 @@ EOF
 }
 
 render_deployment() {
-  local warehouse s3_endpoint
+  local warehouse s3_endpoint jdbc_uri
   warehouse="$(warehouse_uri)"
   s3_endpoint="$(normalized_s3_endpoint)"
+  jdbc_uri="$(postgres_jdbc_uri)"
 
   cat > "${MANIFEST_DIR}/deployment.yaml" <<EOF
 apiVersion: apps/v1
@@ -209,6 +245,8 @@ spec:
         ports:
         - containerPort: ${CONTAINER_PORT}
         env:
+        - name: REST_PORT
+          value: "${CONTAINER_PORT}"
         - name: AWS_REGION
           value: "${AWS_REGION}"
         - name: AWS_DEFAULT_REGION
@@ -231,6 +269,18 @@ spec:
               name: ${SECRET_NAME}
               key: AWS_SESSION_TOKEN
               optional: true
+        - name: CATALOG_URI
+          value: "${jdbc_uri}"
+        - name: CATALOG_JDBC_USER
+          valueFrom:
+            secretKeyRef:
+              name: ${POSTGRES_SECRET_NAME}
+              key: ${POSTGRES_USERNAME_KEY}
+        - name: CATALOG_JDBC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ${POSTGRES_SECRET_NAME}
+              key: ${POSTGRES_PASSWORD_KEY}
         - name: CATALOG_WAREHOUSE
           value: "${warehouse}"
         - name: CATALOG_IO__IMPL
@@ -315,6 +365,7 @@ compute_manifests_hash() {
     "${MANIFEST_DIR}/deployment.yaml" \
     "${MANIFEST_DIR}/service.yaml" > "${tmp}"
   printf '%s\n' "$(secret_fingerprint)" >> "${tmp}"
+  printf '%s\n' "$(postgres_secret_fingerprint)" >> "${tmp}"
   sha256sum "${tmp}" | awk '{print $1}'
   rm -f "${tmp}"
 }
@@ -386,6 +437,7 @@ rollout() {
   require_prereqs
   mkdir -p "${MANIFEST_DIR}"
   ensure_namespace
+  require_postgres_secret
 
   log "starting iceberg rollout"
   log "namespace=${TARGET_NS}"
@@ -396,6 +448,11 @@ rollout() {
   log "s3_endpoint=$(normalized_s3_endpoint)"
   log "s3_path_style_access=${S3_PATH_STYLE_ACCESS}"
   log "secret_name=${SECRET_NAME}"
+  log "postgres_namespace=${POSTGRES_NAMESPACE}"
+  log "postgres_service=${POSTGRES_SERVICE}"
+  log "postgres_port=${POSTGRES_PORT}"
+  log "postgres_db=${POSTGRES_DB}"
+  log "postgres_secret_name=${POSTGRES_SECRET_NAME}"
   log "validate=${run_validate}"
 
   apply_secret

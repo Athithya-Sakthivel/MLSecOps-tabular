@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Build custom MLflow image to ensure required runtime deps (psycopg2, boto3) are present and avoid unstable official images
+# Build custom MLflow image to ensure required runtime deps (psycopg2, boto3) are present and avoid unstable images
 
 FROM docker.io/library/python:3.11.8-slim-bookworm@sha256:90f8795536170fd08236d2ceb74fe7065dbf74f738d8b84bfbf263656654dc9b
 
@@ -12,7 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/tmp \
     TMPDIR=/tmp \
     XDG_CACHE_HOME=/tmp/.cache \
-    MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=true \
+    MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=false \
+    MLFLOW_SERVER_X_FRAME_OPTIONS=SAMEORIGIN \
     MLFLOW_WORKERS=1 \
     MLFLOW_PORT=5000
 

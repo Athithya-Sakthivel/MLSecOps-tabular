@@ -1,0 +1,22 @@
+# The upstream apache/iceberg-rest-fixture image does not include the PostgreSQL JDBC driver
+
+FROM apache/iceberg-rest-fixture:1.10.1
+
+USER root
+
+ARG PG_JDBC_VERSION=42.7.10
+
+RUN set -eux; \
+    curl -fsSL -o /usr/lib/iceberg-rest/postgresql.jar \
+      https://jdbc.postgresql.org/download/postgresql-${PG_JDBC_VERSION}.jar; \
+    chmod 0644 /usr/lib/iceberg-rest/postgresql.jar; \
+    chown iceberg:iceberg /usr/lib/iceberg-rest/postgresql.jar
+
+# Use the directory that actually contains both jars.
+WORKDIR /usr/lib/iceberg-rest
+
+USER iceberg:iceberg
+
+# Make the startup path deterministic. The fixture image runs the REST server
+# with a relative classpath, so keep both jars in the working directory.
+CMD ["java", "-cp", "iceberg-rest-adapter.jar:postgresql.jar", "org.apache.iceberg.rest.RESTCatalogServer"]
