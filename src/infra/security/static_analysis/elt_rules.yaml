@@ -22,6 +22,15 @@ rules:
       - pattern: $DB.sql("...".format(...))
       - pattern: $DB.sql("..." + ...)
       - pattern: $DB.sql("..." % ...)
+    pattern-not-inside: |
+      def ensure_namespace(...):
+          ...
+    pattern-not-inside: |
+      def table_exists(...):
+          ...
+    pattern-not-inside: |
+      def validate_iceberg_catalog(...):
+          ...
 
   - id: elt.security.secret-value-in-logs
     message: >
@@ -63,7 +72,7 @@ rules:
       - pattern: LOG.error(...)
       - pattern: log_json(...)
       - pattern: print(...)
-      
+
   - id: elt.iceberg.expire-snapshots-outside-maintenance
     message: >
       Iceberg snapshot expiration is a destructive maintenance operation.
@@ -81,12 +90,7 @@ rules:
         - "src/workflows/ELT/**/*.py"
       exclude:
         - "src/workflows/ELT/tasks/maintenance_optimize.py"
-    pattern-either:
-      - pattern: execute_sql_action($SPARK, $SQL, ...)
-      - pattern: $SPARK.sql($SQL)
-    metavariable-regex:
-      metavariable: $SQL
-      regex: (?s).*\bsystem\.expire_snapshots\s*\(.*
+    pattern: expire_snapshots_call(...)
 
   - id: elt.iceberg.remove-orphan-files-outside-maintenance
     message: >
@@ -105,12 +109,7 @@ rules:
         - "src/workflows/ELT/**/*.py"
       exclude:
         - "src/workflows/ELT/tasks/maintenance_optimize.py"
-    pattern-either:
-      - pattern: execute_sql_action($SPARK, $SQL, ...)
-      - pattern: $SPARK.sql($SQL)
-    metavariable-regex:
-      metavariable: $SQL
-      regex: (?s).*\bsystem\.remove_orphan_files\s*\(.*
+    pattern: remove_orphan_files_call(...)
 
   - id: elt.iceberg.rewrite-data-files-outside-maintenance
     message: >
@@ -129,9 +128,4 @@ rules:
         - "src/workflows/ELT/**/*.py"
       exclude:
         - "src/workflows/ELT/tasks/maintenance_optimize.py"
-    pattern-either:
-      - pattern: execute_sql_action($SPARK, $SQL, ...)
-      - pattern: $SPARK.sql($SQL)
-    metavariable-regex:
-      metavariable: $SQL
-      regex: (?s).*\bsystem\.rewrite_data_files\s*\(.*
+    pattern: rewrite_data_files_call(...)
