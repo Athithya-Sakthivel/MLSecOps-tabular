@@ -1,4 +1,4 @@
-target-version = "py310" # flyte supports 3.10 well
+target-version = "py310" # spark requires 3.10 
 line-length = 120
 
 [lint]

@@ -39,7 +39,7 @@ ELT_PROFILE = (
 SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark").strip() or "spark"
 ELT_TASK_IMAGE = os.environ.get(
     "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-04-04-07-16--f29803a@sha256:81c49550ff21a984558c04f99b57a36302f485d07cda137b526575b10d24cf46",
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-04-04-14-10--725b6e2@sha256:772077658f980c872bf4a43a24dc7ecf1549f8530765fa4f64b994c8ec199149",
 ).strip()
 if not ELT_TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must not be empty")
