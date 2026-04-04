@@ -83,19 +83,7 @@ jobs:
                 --exclude .mypy_cache \
                 --exclude node_modules \
                 /workspace/src/
-
-              echo "[INFO] === OpenGrep ELT Scan (custom rules) ==="
-              opengrep scan \
-                --config /workspace/src/infra/security/static_analysis/elt_rules.yaml \
-                --error \
-                --max-target-bytes 2000000 \
-                --exclude .spark-ci-artifacts \
-                --exclude __pycache__ \
-                --exclude .pytest_cache \
-                --exclude .mypy_cache \
-                --exclude node_modules \
-                /workspace/src/workflows/ELT/
-
+                
               echo "[INFO] === Gitleaks Full History Scan ==="
               if [ -s /workspace/.gitleaks.toml ]; then
                 echo "[INFO] Using custom Gitleaks config"

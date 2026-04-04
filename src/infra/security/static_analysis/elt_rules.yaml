@@ -3,7 +3,7 @@ rules:
     message: >
       Spark SQL is being built with interpolation, formatting, concatenation, or percent formatting.
       Keep SQL text static and move all identifier handling into validated helper functions.
-    severity: WARNING
+    severity: ERROR
     languages: [python]
     metadata:
       category: security
@@ -17,27 +17,26 @@ rules:
         - "src/workflows/ELT/**/*.py"
       exclude:
         - "src/workflows/ELT/tasks/maintenance_optimize.py"
-    patterns:
-      - pattern-either:
-          - pattern: $DB.sql(f"...{...}...")
-          - pattern: $DB.sql("...".format(...))
-          - pattern: $DB.sql("..." + ...)
-          - pattern: $DB.sql("..." % ...)
-      - pattern-not-inside: |
-          def ensure_namespace(...):
-              ...
-      - pattern-not-inside: |
-          def table_exists(...):
-              ...
-      - pattern-not-inside: |
-          def validate_iceberg_catalog(...):
-              ...
+    pattern-either:
+      - pattern: $DB.sql(f"...{...}...")
+      - pattern: $DB.sql("...".format(...))
+      - pattern: $DB.sql("..." + ...)
+      - pattern: $DB.sql("..." % ...)
+    pattern-not-inside: |
+      def ensure_namespace(...):
+          ...
+    pattern-not-inside: |
+      def table_exists(...):
+          ...
+    pattern-not-inside: |
+      def validate_iceberg_catalog(...):
+          ...
 
   - id: elt.security.secret-value-in-logs
     message: >
       A secret or token derived from environment configuration is flowing into logs.
       Do not log access keys, session tokens, or Hugging Face tokens.
-    severity: WARNING
+    severity: ERROR
     languages: [python]
     mode: taint
     metadata:
@@ -73,3 +72,60 @@ rules:
       - pattern: LOG.error(...)
       - pattern: log_json(...)
       - pattern: print(...)
+
+  - id: elt.iceberg.expire-snapshots-outside-maintenance
+    message: >
+      Iceberg snapshot expiration is a destructive maintenance operation.
+      Keep it isolated to src/workflows/ELT/tasks/maintenance_optimize.py.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags: ["snapshot-expiration", "maintenance", "rollback-risk"]
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+      exclude:
+        - "src/workflows/ELT/tasks/maintenance_optimize.py"
+    pattern: expire_snapshots_call(...)
+
+  - id: elt.iceberg.remove-orphan-files-outside-maintenance
+    message: >
+      Iceberg orphan-file cleanup deletes storage objects that are no longer referenced by table metadata.
+      Keep it isolated to src/workflows/ELT/tasks/maintenance_optimize.py.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags: ["orphan-files", "delete", "maintenance"]
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+      exclude:
+        - "src/workflows/ELT/tasks/maintenance_optimize.py"
+    pattern: remove_orphan_files_call(...)
+
+  - id: elt.iceberg.rewrite-data-files-outside-maintenance
+    message: >
+      Iceberg rewrite_data_files is a compaction and file-rewrite operation.
+      Keep it isolated to src/workflows/ELT/tasks/maintenance_optimize.py.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: iceberg-safety
+      technology: ["python", "pyspark", "iceberg"]
+      confidence: high
+      impact: high
+      tags: ["rewrite-data-files", "compaction", "maintenance"]
+    paths:
+      include:
+        - "src/workflows/ELT/**/*.py"
+      exclude:
+        - "src/workflows/ELT/tasks/maintenance_optimize.py"
+    pattern: rewrite_data_files_call(...)
