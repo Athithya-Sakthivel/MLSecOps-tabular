@@ -192,7 +192,6 @@ if IS_PROD:
     SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "256m")
 
     TASK_RETRIES = _env_int("BRONZE_TASK_RETRIES", 1, minimum=0)
-    MAX_ROWS_TO_EXTRACT_FROM_DATASETS = _env_int("MAX_ROWS_TO_EXTRACT_FROM_DATASETS", 25000, minimum=0)
     BRONZE_CHUNK_SIZE = _env_int("BRONZE_CHUNK_SIZE", 2000, minimum=1)
     BRONZE_ROWS_PER_PARTITION = _env_int("BRONZE_ROWS_PER_PARTITION", 50000, minimum=1)
     ICEBERG_TARGET_FILE_SIZE_BYTES = _env_str("ICEBERG_TARGET_FILE_SIZE_BYTES", "268435456")
@@ -213,7 +212,6 @@ else:
     SPARK_MAX_RESULT_SIZE = _env_str("SPARK_MAX_RESULT_SIZE", "128m")
 
     TASK_RETRIES = _env_int("BRONZE_TASK_RETRIES", 0, minimum=0)
-    MAX_ROWS_TO_EXTRACT_FROM_DATASETS = _env_int("MAX_ROWS_TO_EXTRACT_FROM_DATASETS", 10000, minimum=0)
     BRONZE_CHUNK_SIZE = _env_int("BRONZE_CHUNK_SIZE", 1000, minimum=1)
     BRONZE_ROWS_PER_PARTITION = _env_int("BRONZE_ROWS_PER_PARTITION", 25000, minimum=1)
     ICEBERG_TARGET_FILE_SIZE_BYTES = _env_str("ICEBERG_TARGET_FILE_SIZE_BYTES", "268435456")
@@ -826,6 +824,24 @@ def _spark_tuning_summary() -> dict[str, Any]:
     }
 
 
+def _resolve_max_rows_to_extract_from_datasets(
+    max_rows_to_extract_from_datasets: int | None,
+) -> int | None:
+    if max_rows_to_extract_from_datasets is not None:
+        if max_rows_to_extract_from_datasets <= 0:
+            return None
+        return max_rows_to_extract_from_datasets
+
+    env_value = os.environ.get("MAX_ROWS_TO_EXTRACT_FROM_DATASETS")
+    if env_value is None or env_value.strip() == "":
+        return None
+
+    value = int(env_value)
+    if value <= 0:
+        return None
+    return value
+
+
 @task(
     task_config=Spark(
         spark_conf=build_spark_conf(
@@ -847,8 +863,9 @@ def _spark_tuning_summary() -> dict[str, Any]:
     retries=TASK_RETRIES,
     limits=TASK_LIMITS,
 )
-def bronze_ingest() -> BronzeIngestResult:
+def bronze_ingest(max_rows_to_extract_from_datasets: int | None = None) -> BronzeIngestResult:
     run_id = os.environ.get("RUN_ID") or os.environ.get("FLYTE_INTERNAL_EXECUTION_ID") or uuid.uuid4().hex
+    row_cap = _resolve_max_rows_to_extract_from_datasets(max_rows_to_extract_from_datasets)
 
     trips_source_ref = f"{TRIPS_DATASET_ID}@{TRIPS_DATASET_REVISION}" if TRIPS_DATASET_REVISION else TRIPS_DATASET_ID
     taxi_zone_source_ref = TAXI_ZONE_LOOKUP_URL
@@ -865,7 +882,7 @@ def bronze_ingest() -> BronzeIngestResult:
         iceberg_rest_auth_type=ICEBERG_REST_AUTH_TYPE,
         trips_source=trips_source_ref,
         taxi_zone_source=taxi_zone_source_ref,
-        max_rows=MAX_ROWS_TO_EXTRACT_FROM_DATASETS,
+        max_rows=row_cap,
         spark_tuning=_spark_tuning_summary(),
     )
 
@@ -901,9 +918,9 @@ def bronze_ingest() -> BronzeIngestResult:
     for i, row in enumerate(taxi_preview, start=1):
         log_json(msg="taxi_zone_preview_row", row=i, data=normalize_record(dict(row)))
 
-    if MAX_ROWS_TO_EXTRACT_FROM_DATASETS > 0:
-        trips_iter = islice(trips_iter, MAX_ROWS_TO_EXTRACT_FROM_DATASETS)
-        taxi_iter = islice(taxi_iter, MAX_ROWS_TO_EXTRACT_FROM_DATASETS)
+    if row_cap is not None:
+        trips_iter = islice(trips_iter, row_cap)
+        taxi_iter = islice(taxi_iter, row_cap)
 
     trips_raw_df, trips_rows = stream_to_dataframe(
         spark,

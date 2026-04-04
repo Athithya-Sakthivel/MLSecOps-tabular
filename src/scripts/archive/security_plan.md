@@ -335,10 +335,3 @@ This setup gives:
 
 With **minimal operational overhead**.
 
----
-
-If you want, I can:
-
-* generate a **complete repo template**
-* provide **Kyverno policies tailored to your org**
-* or produce a **fully integrated CI YAML (Gitleaks + Trivy + Cosign + ECR)**

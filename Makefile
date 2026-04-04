@@ -1,24 +1,21 @@
-lc:
+core:
 	kind delete cluster --name local-cluster || true && kind create cluster --name local-cluster && \
 	K8S_CLUSTER=kind bash src/infra/core/default_storage_class.sh && \
-	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh --rollout && \
-	bash src/infra/elt/iceberg.sh --rollout && bash src/infra/elt/spark_operator.sh --rollout && \
-	bash src/infra/train/kuberay_operator.sh --rollout && python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/train/commands.sh
-
-
-train:
-	kind create cluster --name local-cluster && \
-	K8S_CLUSTER=kind bash src/infra/core/default_storage_class.sh && \
-	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh --rollout && \
-	bash src/infra/train/kuberay_operator.sh --rollout && python3 src/infra/train/mlflow_server.py
+	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh deploy
 
 elt:
-	bash src/infra/elt/iceberg_image.sh --rollout && bash src/infra/elt/spark_operator.sh && \
-	python3 src/infra/core/flyte_setup.py --rollout && \
-
+	bash src/infra/elt/iceberg.sh --rollout && bash src/infra/elt/spark_operator.sh --rollout && \
+	python3 src/infra/core/flyte_setup.py --rollout
 
 prune-elt:
 	bash 
+
+backup-pg:
+	bash src/infra/core/postgres_cluster.sh backup && aws s3 ls $$PG_BACKUPS_S3_BUCKET/postgres_backups/ --recursive
+
+train:
+	bash src/infra/train/kuberay_operator.sh --rollout && python3 src/infra/train/mlflow_server.py
+
 
 set-sa:
 	bash src/core/default_storage_class.sh
@@ -42,12 +39,21 @@ clean:
 	rm -rf src/terraform/.plans
 	clear
 
-
 recreate:
 	make rollout-pg && bash src/tests/core/postgres_cluster.sh || true
 
 rollout-signoz:
 	bash src/core/signoz.sh --rollout && bash src/tests/signoz.sh
+
+
+validate-pg:
+	kind delete cluster --name local-cluster || true && kind create cluster --name local-cluster && \
+	K8S_CLUSTER=kind bash src/infra/core/default_storage_class.sh && \
+	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh deploy && \
+	bash src/tests/infra/validate_cnpg_latest_restore.sh && \
+	bash src/tests/infra/validate_cnpg_PITR.sh && \
+	aws s3 ls s3://$$PG_BACKUPS_S3_BUCKET/postgres_backups/ --recursive
+
 
 
 iac-staging:

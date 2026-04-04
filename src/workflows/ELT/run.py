@@ -26,8 +26,8 @@ ELT_ROOT = SRC_ROOT / "workflows" / "ELT"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-REMOTE_PROJECT = os.environ.get("REMOTE_PROJECT", "flytesnacks").strip()
-REMOTE_DOMAIN = os.environ.get("REMOTE_DOMAIN", "development").strip()
+REMOTE_PROJECT = os.environ.get("REMOTE_PROJECT", "flytesnacks").strip() or "flytesnacks"
+REMOTE_DOMAIN = os.environ.get("REMOTE_DOMAIN", "development").strip() or "development"
 TASK_NAMESPACE = os.environ.get("TASK_NAMESPACE", f"{REMOTE_PROJECT}-{REMOTE_DOMAIN}").strip()
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
@@ -39,20 +39,19 @@ ELT_PROFILE = (
 SPARK_SERVICE_ACCOUNT = os.environ.get("SPARK_SERVICE_ACCOUNT", "spark").strip() or "spark"
 ELT_TASK_IMAGE = os.environ.get(
     "ELT_TASK_IMAGE",
-    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-04-02-16-28--852c5b8@sha256:ae3c9d2b2c03c0bdffb7149c2beaec5932ee9f39feae85ddaa4431e09f4a6e43",
+    "ghcr.io/athithya-sakthivel/flyte-elt-task:2026-04-04-07-16--f29803a@sha256:81c49550ff21a984558c04f99b57a36302f485d07cda137b526575b10d24cf46",
 ).strip()
 if not ELT_TASK_IMAGE:
     raise RuntimeError("ELT_TASK_IMAGE must not be empty")
-
 os.environ["ELT_TASK_IMAGE"] = ELT_TASK_IMAGE
 
 WORKFLOW_SOURCE_FILE = SRC_ROOT / "workflows" / "ELT" / "launch_plans.py"
 WORKFLOW_SOURCE_REL = WORKFLOW_SOURCE_FILE.relative_to(SRC_ROOT)
-WORKFLOW_IMPORT_MODULE = os.environ.get("WORKFLOW_IMPORT_MODULE", "workflows.ELT.launch_plans")
+WORKFLOW_IMPORT_MODULE = os.environ.get("WORKFLOW_IMPORT_MODULE", "workflows.ELT.launch_plans").strip()
 
 USE_PORT_FORWARD = os.environ.get("USE_PORT_FORWARD", "1").lower() in {"1", "true", "yes", "y", "on"}
-FLYTE_ADMIN_NAMESPACE = os.environ.get("FLYTE_ADMIN_NAMESPACE", "flyte")
-FLYTE_ADMIN_HOST = os.environ.get("FLYTE_ADMIN_HOST", "127.0.0.1")
+FLYTE_ADMIN_NAMESPACE = os.environ.get("FLYTE_ADMIN_NAMESPACE", "flyte").strip() or "flyte"
+FLYTE_ADMIN_HOST = os.environ.get("FLYTE_ADMIN_HOST", "127.0.0.1").strip() or "127.0.0.1"
 FLYTE_ADMIN_PORT = int(os.environ.get("FLYTE_ADMIN_PORT", "30081"))
 PORT_FORWARD_TARGET_PORT = int(os.environ.get("PORT_FORWARD_TARGET_PORT", "81"))
 PORT_FORWARD_LOG = Path(os.environ.get("PORT_FORWARD_LOG", "/tmp/flyteadmin-portforward.log"))
@@ -493,11 +492,24 @@ def ensure_namespace_bootstrap_ready() -> None:
 
 
 def registration_tree_files() -> list[Path]:
-    return [
-        path
-        for path in sorted(ELT_ROOT.rglob("*.py"))
-        if "__pycache__" not in path.parts and path.is_file()
-    ]
+    files: list[Path] = [WORKFLOW_SOURCE_FILE]
+    for root in (
+        SRC_ROOT / "workflows" / "ELT" / "tasks",
+        SRC_ROOT / "workflows" / "ELT" / "workflows",
+    ):
+        if root.is_dir():
+            files.extend(sorted(p for p in root.rglob("*.py") if p.is_file()))
+    return [path for path in dedupe_paths(files) if path.is_file()]
+
+
+def dedupe_paths(items: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
 
 
 @functools.lru_cache(maxsize=1)
@@ -524,6 +536,12 @@ def pyflyte_register_supports_copy_or_fast_flag() -> tuple[bool, bool]:
     return ("--copy" in combined, "--fast" in combined)
 
 
+def pyflyte_register_supports_service_account() -> bool:
+    help_text = run_cmd(["pyflyte", "register", "--help"], check=False, capture_output=True)
+    combined = f"{help_text.stdout}\n{help_text.stderr}"
+    return "--service-account" in combined
+
+
 def build_register_env() -> dict[str, str]:
     register_env = os.environ.copy()
     register_env["ELT_TASK_IMAGE"] = ELT_TASK_IMAGE
@@ -544,12 +562,12 @@ def build_register_command(registration_version: str) -> list[str]:
         ELT_TASK_IMAGE,
         "--version",
         registration_version,
-        "--service-account",
-        SPARK_SERVICE_ACCOUNT,
     ]
 
-    supports_copy, supports_fast = pyflyte_register_supports_copy_or_fast_flag()
+    if pyflyte_register_supports_service_account():
+        cmd.extend(["--service-account", SPARK_SERVICE_ACCOUNT])
 
+    supports_copy, supports_fast = pyflyte_register_supports_copy_or_fast_flag()
     if supports_copy:
         cmd.extend(["--copy", "none"])
     elif supports_fast:
@@ -579,6 +597,7 @@ def _activate_launch_plan(lp_name: str, version: str) -> None:
             "--version",
             version,
             "--activate",
+            "--force",
         ]
     )
 

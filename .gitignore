@@ -39,6 +39,8 @@ MANIFEST
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+src/scripts/archive/cnpg-1.28.2.yaml
+src/scripts/archive/plans/
 
 # Unit test / coverage reports
 htmlcov/

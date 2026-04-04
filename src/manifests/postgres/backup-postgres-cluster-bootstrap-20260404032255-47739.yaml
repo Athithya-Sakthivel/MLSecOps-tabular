@@ -1,0 +1,9 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: postgres-cluster-bootstrap-20260404032255-47739
+  namespace: default
+spec:
+  method: barmanObjectStore
+  cluster:
+    name: postgres-cluster

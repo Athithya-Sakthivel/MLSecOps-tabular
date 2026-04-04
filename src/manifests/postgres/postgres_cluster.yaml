@@ -1,21 +1,46 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: postgres-cluster
+  name: postgres-cluster-latest-restore-validate-110697
   namespace: default
 spec:
   instances: 1
-  imageName: ghcr.io/cloudnative-pg/postgresql:18.3-minimal-trixie
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie
+  backup:
+    retentionPolicy: 30d
+    barmanObjectStore:
+      destinationPath: s3://e2e-mlops-data-681802563986/postgres_backups/
+      serverName: postgres-cluster-latest-restore-validate-110697-20260404054839-111284
+      s3Credentials:
+        accessKeyId:
+          name: aws-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: aws-creds
+          key: ACCESS_SECRET_KEY
+      wal:
+        compression: gzip
+      data:
+        compression: gzip
   bootstrap:
-    initdb:
-      database: flyte_admin
-      owner: app
-      postInitSQL:
-        - CREATE DATABASE datacatalog OWNER app;
-        - CREATE DATABASE mlflow OWNER app;
-        - CREATE DATABASE iceberg OWNER app;
-      postInitApplicationSQL:
-        - ALTER SCHEMA public OWNER TO app;
+    recovery:
+      source: origin
+  externalClusters:
+    - name: origin
+      barmanObjectStore:
+        destinationPath: s3://e2e-mlops-data-681802563986/postgres_backups/
+        serverName: postgres-cluster
+        s3Credentials:
+          accessKeyId:
+            name: aws-creds
+            key: ACCESS_KEY_ID
+          secretAccessKey:
+            name: aws-creds
+            key: ACCESS_SECRET_KEY
+        wal:
+          compression: gzip
+        data:
+          compression: gzip
   storage:
     storageClass: default-storage-class
     size: 5Gi

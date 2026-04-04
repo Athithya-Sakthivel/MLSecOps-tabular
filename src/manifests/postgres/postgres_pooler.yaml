@@ -1,11 +1,11 @@
 apiVersion: postgresql.cnpg.io/v1
 kind: Pooler
 metadata:
-  name: postgres-pooler
+  name: postgres-cluster-latest-restore-validate-110697-pooler
   namespace: default
 spec:
   cluster:
-    name: postgres-cluster
+    name: postgres-cluster-latest-restore-validate-110697
   instances: 1
   type: rw
   pgbouncer:
@@ -21,14 +21,14 @@ spec:
       securityContext:
         runAsNonRoot: true
       containers:
-      - name: pgbouncer
-        securityContext:
-          runAsNonRoot: true
-          allowPrivilegeEscalation: false
-        resources:
-          requests:
-            cpu: 50m
-            memory: 64Mi
-          limits:
-            cpu: 200m
-            memory: 256Mi
+        - name: pgbouncer
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
