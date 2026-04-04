@@ -9,7 +9,6 @@ from workflows.ELT.tasks.silver_transform import SilverTransformResult, silver_t
 
 __all__ = ["elt_workflow"]
 
-
 @workflow
 def elt_workflow() -> GoldFeatureResult:
     bronze: BronzeIngestResult = bronze_ingest()
