@@ -48,6 +48,6 @@ RUN python -m pip install --no-index --find-links=/wheels -r /opt/app/src/workfl
 
 USER appuser
 
-# Uses tini as PID 1 to forward signals and reap zombies processes, ensuring clean shutdown for Ray workers
+# Uses tini as PID 1 to forward signals and reap zombies, ensuring clean shutdown for Ray workers
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
