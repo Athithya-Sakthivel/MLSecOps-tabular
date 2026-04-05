@@ -3,7 +3,7 @@
 # - minimal Python dependencies
 # - Iceberg + Hadoop AWS runtime jars
 # - writable cache directories for Hugging Face / datasets
-# apache/spark:4.0.2-scala2.13-java21-python3-ubuntu
+
 FROM apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
 
 USER root
@@ -28,11 +28,13 @@ ENV SPARK_HOME=/opt/spark \
     LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    python3-venv \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      python3-venv && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade \
@@ -56,6 +58,9 @@ RUN set -eux; \
     curl -fsSL \
       "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_BUNDLE_VERSION}/bundle-${AWS_SDK_BUNDLE_VERSION}.jar" \
       -o "${SPARK_HOME}/jars/bundle-${AWS_SDK_BUNDLE_VERSION}.jar"; \
+    rm -f \
+      "${SPARK_HOME}/examples/jars/jackson-core-asl-1.9.13.jar" \
+      "${SPARK_HOME}/examples/jars/jackson-mapper-asl-1.9.13.jar"; \
     chmod -R a+rX "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${XDG_CACHE_HOME}"; \
     chown -R 185:0 "${SPARK_HOME}" /opt/venv "${HF_HOME}" "${XDG_CACHE_HOME}"
 

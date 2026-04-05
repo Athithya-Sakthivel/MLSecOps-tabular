@@ -17,19 +17,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: train-image-ci-${{ github.ref }}
+  group: train-staging-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
-
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
 
 jobs:
-  scan:
-    name: train-scan
+  build-scan-push:
+    name: Build, scan, publish image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: staging
@@ -41,43 +37,80 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+          fetch-depth: 1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - name: Run Train CI
-        env:
-          PUSH_IMAGE: 'true'
-        run: bash src/workflows/train/CI_staging.sh
+      - name: Compute image metadata
+        id: image-meta
+        shell: bash
+        run: |
+          set -euo pipefail
 
-  build:
-    name: train-build-publish
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    needs: scan
-    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
-    environment: staging
+          GHCR_USER="${GHCR_USER:-athithya-sakthivel}"
+          IMAGE_NAME="${IMAGE_NAME:-flyte-train-task}"
+          IMAGE_TAG="${IMAGE_TAG:-$(TZ=Asia/Kolkata date +%Y-%m-%d-%H-%M)--$(git rev-parse --short HEAD)}"
+          TRAIN_TASK_IMAGE="${TRAIN_TASK_IMAGE:-ghcr.io/${GHCR_USER}/${IMAGE_NAME}:${IMAGE_TAG}}"
+          IMAGE_STAGING="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:staging"
 
-    env:
-      GIT_PAT: ${{ secrets.GIT_PAT }}
+          {
+            echo "ghcr_user=$GHCR_USER"
+            echo "image_name=$IMAGE_NAME"
+            echo "image_tag=$IMAGE_TAG"
+            echo "train_task_image=$TRAIN_TASK_IMAGE"
+            echo "image_staging=$IMAGE_STAGING"
+          } >> "$GITHUB_OUTPUT"
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Compute Trivy cache key
+        id: trivy-key
+        run: echo "key=trivy-${RUNNER_OS}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Trivy cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          fetch-depth: 0
+          path: ~/.cache/trivy
+          key: ${{ steps.trivy-key.outputs.key }}
+          restore-keys: |
+            trivy-${{ runner.os }}-
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - name: Build image locally
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          file: src/workflows/train/Dockerfile.flyte_task
+          load: true
+          push: false
+          tags: |
+            ${{ steps.image-meta.outputs.train_task_image }}
+            ${{ steps.image-meta.outputs.image_staging }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - name: Scan image with Trivy
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.cache/trivy:/root/.cache/" \
+            "${TRIVY_IMAGE}" \
+            image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-on-eol 1 \
+            --exit-code 1 \
+            --quiet \
+            "${{ steps.image-meta.outputs.train_task_image }}"
 
-      - name: Build and publish image
-        env:
-          PUSH_IMAGE: 'true'
-        run: bash src/workflows/train/CI_staging.sh
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ steps.image-meta.outputs.ghcr_user }}
+          password: ${{ env.GIT_PAT }}
+
+      - name: Push image tags
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push "${{ steps.image-meta.outputs.train_task_image }}"
+          docker push "${{ steps.image-meta.outputs.image_staging }}"
