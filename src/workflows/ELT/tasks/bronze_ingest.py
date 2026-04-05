@@ -45,7 +45,7 @@ ICEBERG_WAREHOUSE = (
 
 K8S_CLUSTER = os.environ.get("K8S_CLUSTER", "kind").strip().lower()
 ELT_PROFILE = (
-    os.environ.get("ELT_PROFILE", "dev" if K8S_CLUSTER in {"kind", "minikube", "docker-desktop", "local"} else "prod")
+    os.environ.get("ELT_PROFILE", "dev" if K8S_CLUSTER in {"kind"} else "prod")
     .strip()
     .lower()
 )

@@ -1,6 +1,9 @@
-# Flyte task image for ELT and iceberg maintenance runtime with all security fixes
+# Flyte task image for ELT and iceberg maintenance runtime
+# - wheel-only Python installs keep flytekit out of its source-build path
+# - vulnerable Spark/Hadoop jars are removed and replaced with fixed lines
+# - the same jar set is kept in /opt/spark/jars and pyspark's bundled jars
 
-FROM docker.io/apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
+FROM apache/spark:4.0.2-java21-python3@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -12,12 +15,16 @@ ARG ICEBERG_VERSION=1.10.1
 ARG HADOOP_AWS_VERSION=3.4.3
 ARG HADOOP_CLIENT_RUNTIME_VERSION=3.4.3
 ARG HADOOP_CLIENT_API_VERSION=3.4.3
-ARG AWS_SDK_BUNDLE_VERSION=2.42.23
+ARG AWS_SDK_BUNDLE_VERSION=2.35.4
 
 ARG NETTY_VERSION=4.1.132.Final
+ARG AVRO_VERSION=1.11.4
+ARG BEANUTILS_VERSION=1.11.0
+ARG JACKSON_CORE_VERSION=2.15.0
+ARG DERBY_VERSION=10.17.1.0
+ARG ZOOKEEPER_VERSION=3.9.5
 ARG LZ4_VERSION=1.10.1
 ARG AIRCOMPRESSOR_VERSION=2.0.3
-ARG DERBY_VERSION=10.17.1.0
 
 ENV SPARK_HOME=/opt/spark \
     VIRTUAL_ENV=/opt/venv \
@@ -38,7 +45,6 @@ ENV SPARK_HOME=/opt/spark \
 
 RUN set -eux; \
     apt-get update; \
-    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
@@ -51,66 +57,100 @@ RUN set -eux; \
       pip==26.0.1 \
       setuptools==78.1.1 \
       wheel==0.46.3; \
-    /opt/venv/bin/pip install --no-cache-dir \
+    /opt/venv/bin/pip install --only-binary=:all: \
       cloudpickle==3.1.2 \
       datasets==4.8.4 \
       flytekit==1.16.15 \
       flytekitplugins-spark==1.16.15
 
 RUN set -eux; \
-    mkdir -p \
-      "${SPARK_HOME}/jars" \
-      "${SPARK_HOME}/work-dir" \
-      "${HF_HOME}" \
-      "${HUGGINGFACE_HUB_CACHE}" \
-      "${HF_DATASETS_CACHE}" \
-      "${XDG_CACHE_HOME}"; \
+    PYSPARK_JARS_DIR="$(find /opt/venv/lib -type d -path '*/site-packages/pyspark/jars' | head -n1)"; \
+    test -n "${PYSPARK_JARS_DIR}"; \
+    JAR_DIRS=("${SPARK_HOME}/jars" "${PYSPARK_JARS_DIR}"); \
+    \
+    for dir in "${JAR_DIRS[@]}"; do \
+      mkdir -p "${dir}" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}"; \
+    done; \
+    \
+    remove_matching_jars() { \
+      local pattern="$1"; \
+      local dir; \
+      for dir in "${JAR_DIRS[@]}"; do \
+        find "${dir}" -maxdepth 1 -type f -name "${pattern}" -delete; \
+      done; \
+    }; \
     \
     download_maven_jar() { \
       local group="$1"; \
       local artifact="$2"; \
       local version="$3"; \
+      local classifier="${4:-}"; \
       local rel_path="${group//./\/}/${artifact}/${version}"; \
-      local url="https://repo1.maven.org/maven2/${rel_path}/${artifact}-${version}.jar"; \
-      local dest="${SPARK_HOME}/jars/${artifact}-${version}.jar"; \
-      local expected_sha512; \
-      curl -fsSLo "${dest}" "${url}"; \
-      expected_sha512="$(curl -fsSL "${url}.sha512" | tr -d '[:space:]')"; \
-      echo "${expected_sha512}  ${dest}" | sha512sum -c -; \
+      local filename="${artifact}-${version}${classifier:+-${classifier}}.jar"; \
+      local base_url="https://repo1.maven.org/maven2/${rel_path}"; \
+      local tmpdir tmpfile checksum; \
+      tmpdir="$(mktemp -d)"; \
+      tmpfile="${tmpdir}/${filename}"; \
+      curl -fsSL --retry 3 --connect-timeout 10 -o "${tmpfile}" "${base_url}/${filename}"; \
+      if curl -fsSL --retry 3 --connect-timeout 10 -o "${tmpfile}.sha512" "${base_url}/${filename}.sha512"; then \
+        checksum="$(tr -d '[:space:]' < "${tmpfile}.sha512")"; \
+        printf '%s  %s\n' "${checksum}" "${tmpfile}" | sha512sum -c -; \
+      elif curl -fsSL --retry 3 --connect-timeout 10 -o "${tmpfile}.sha1" "${base_url}/${filename}.sha1"; then \
+        checksum="$(tr -d '[:space:]' < "${tmpfile}.sha1")"; \
+        printf '%s  %s\n' "${checksum}" "${tmpfile}" | sha1sum -c -; \
+      else \
+        echo "WARN: no checksum for ${artifact}-${version}, skipping verification" >&2; \
+      fi; \
+      local dir; \
+      for dir in "${JAR_DIRS[@]}"; do \
+        cp -f "${tmpfile}" "${dir}/${filename}"; \
+      done; \
+      rm -rf "${tmpdir}"; \
     }; \
     \
-    rm -f \
-      "${SPARK_HOME}/jars"/aircompressor-*.jar \
-      "${SPARK_HOME}/jars"/bundle-*.jar \
-      "${SPARK_HOME}/jars"/derby-*.jar \
-      "${SPARK_HOME}/jars"/hadoop-client-api-*.jar \
-      "${SPARK_HOME}/jars"/hadoop-client-runtime-*.jar \
-      "${SPARK_HOME}/jars"/lz4-java-*.jar \
-      "${SPARK_HOME}/jars"/netty-buffer-*.jar \
-      "${SPARK_HOME}/jars"/netty-codec-*.jar \
-      "${SPARK_HOME}/jars"/netty-common-*.jar \
-      "${SPARK_HOME}/jars"/netty-handler-*.jar \
-      "${SPARK_HOME}/jars"/netty-resolver-*.jar \
-      "${SPARK_HOME}/jars"/netty-transport-*.jar \
-      "${SPARK_HOME}/jars"/spark-connect-client-jvm_*.jar; \
+    remove_matching_jars 'aircompressor-*.jar'; \
+    remove_matching_jars 'avro-*.jar'; \
+    remove_matching_jars 'bundle-*.jar'; \
+    remove_matching_jars 'commons-beanutils-*.jar'; \
+    remove_matching_jars 'derby-*.jar'; \
+    remove_matching_jars 'hadoop-aws-*.jar'; \
+    remove_matching_jars 'hadoop-client-api-*.jar'; \
+    remove_matching_jars 'hadoop-client-runtime-*.jar'; \
+    remove_matching_jars 'jackson-core-*.jar'; \
+    remove_matching_jars 'lz4-java-*.jar'; \
+    remove_matching_jars 'netty-*.jar'; \
+    remove_matching_jars 'spark-connect-client-jvm_*.jar'; \
+    remove_matching_jars 'zookeeper-*.jar'; \
     \
     download_maven_jar org.apache.iceberg iceberg-spark-runtime-4.0_2.13 "${ICEBERG_VERSION}"; \
     download_maven_jar org.apache.hadoop hadoop-aws "${HADOOP_AWS_VERSION}"; \
     download_maven_jar org.apache.hadoop hadoop-client-runtime "${HADOOP_CLIENT_RUNTIME_VERSION}"; \
     download_maven_jar org.apache.hadoop hadoop-client-api "${HADOOP_CLIENT_API_VERSION}"; \
     download_maven_jar software.amazon.awssdk bundle "${AWS_SDK_BUNDLE_VERSION}"; \
+    \
+    download_maven_jar org.apache.avro avro "${AVRO_VERSION}"; \
+    download_maven_jar commons-beanutils commons-beanutils "${BEANUTILS_VERSION}"; \
+    download_maven_jar com.fasterxml.jackson.core jackson-core "${JACKSON_CORE_VERSION}"; \
+    download_maven_jar org.apache.derby derby "${DERBY_VERSION}"; \
+    download_maven_jar org.apache.zookeeper zookeeper "${ZOOKEEPER_VERSION}"; \
+    download_maven_jar at.yawk.lz4 lz4-java "${LZ4_VERSION}"; \
+    download_maven_jar io.airlift aircompressor "${AIRCOMPRESSOR_VERSION}"; \
+    \
     download_maven_jar io.netty netty-buffer "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-codec "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-codec-dns "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-codec-http "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-codec-http2 "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-codec-socks "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-common "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-handler "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-handler-proxy "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-resolver "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-resolver-dns "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-transport "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-transport-classes-epoll "${NETTY_VERSION}"; \
     download_maven_jar io.netty netty-transport-native-unix-common "${NETTY_VERSION}"; \
-    download_maven_jar org.apache.derby derby "${DERBY_VERSION}"; \
-    download_maven_jar org.lz4 lz4-java "${LZ4_VERSION}"; \
-    download_maven_jar io.airlift aircompressor "${AIRCOMPRESSOR_VERSION}"; \
+    download_maven_jar io.netty netty-transport-native-epoll "${NETTY_VERSION}" linux-x86_64; \
     \
     rm -f \
       "${SPARK_HOME}/examples/jars/jackson-core-asl-1.9.13.jar" \

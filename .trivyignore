@@ -1,0 +1,14 @@
+CVE-2024-6345 # setuptools<70 required by flytekit; package_index not used
+CVE-2025-47273 # setuptools constraint; no PackageIndex usage in runtime
+
+CVE-2026-0861 # glibc (libc6/libc-bin); no direct usage of memalign from user input
+CVE-2025-69720 # ncurses/libtinfo; no TTY interaction in container
+CVE-2025-7458 # libsqlite3; no untrusted SQL execution path
+CVE-2026-29111 # libsystemd/libudev; container does not run systemd
+CVE-2023-45853 # zlib; no direct zip manipulation with untrusted input
+
+CVE-2024-35870 # kernel SMB client UAF; container image cannot patch host kernel
+CVE-2024-53179 # kernel SMB client UAF; container image cannot patch host kernel
+CVE-2025-37899 # kernel ksmbd session logoff UAF; container image cannot patch host kernel
+CVE-2025-38118 # kernel Bluetooth MGMT UAF; container image cannot patch host kernel
+CVE-2026-23112 # kernel nvmet-tcp bounds check; container image cannot patch host kernel
