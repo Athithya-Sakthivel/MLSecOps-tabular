@@ -21,3 +21,19 @@ ignore:
 
   - vulnerability: CVE-2023-45853
     reason: zlib; no direct zip manipulation with untrusted input
+
+  # --- Host kernel findings (image scan cannot fix these; requires node/kernel patching) ---
+  - vulnerability: CVE-2024-35870
+    reason: kernel SMB client UAF; container image cannot patch host kernel
+
+  - vulnerability: CVE-2024-53179
+    reason: kernel SMB client UAF; container image cannot patch host kernel
+
+  - vulnerability: CVE-2025-37899
+    reason: kernel ksmbd session logoff UAF; container image cannot patch host kernel
+
+  - vulnerability: CVE-2025-38118
+    reason: kernel Bluetooth MGMT UAF; container image cannot patch host kernel
+
+  - vulnerability: CVE-2026-23112
+    reason: kernel nvmet-tcp bounds check; container image cannot patch host kernel

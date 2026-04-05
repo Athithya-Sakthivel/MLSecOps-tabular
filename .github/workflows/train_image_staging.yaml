@@ -98,7 +98,7 @@ jobs:
             -v "$HOME/.cache/trivy:/root/.cache/" \
             "${TRIVY_IMAGE}" \
             image \
-            --ignorefile .trivyignore \
+            --ignorefile .trivyignore.yaml \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --exit-on-eol 1 \
