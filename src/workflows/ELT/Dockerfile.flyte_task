@@ -1,17 +1,23 @@
-# Flyte task image for ELT and iceberg maintenance runtime
-# The image adds:
-# - minimal Python dependencies
-# - Iceberg + Hadoop AWS runtime jars
-# - writable cache directories for Hugging Face / datasets
+# Flyte task image for ELT and iceberg maintenance runtime with all security fixes
 
-FROM apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
+FROM docker.io/apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 USER root
 
 ARG DEBIAN_FRONTEND=noninteractive
+
 ARG ICEBERG_VERSION=1.10.1
-ARG HADOOP_AWS_VERSION=3.4.1
-ARG AWS_SDK_BUNDLE_VERSION=2.23.5
+ARG HADOOP_AWS_VERSION=3.4.3
+ARG HADOOP_CLIENT_RUNTIME_VERSION=3.4.3
+ARG HADOOP_CLIENT_API_VERSION=3.4.3
+ARG AWS_SDK_BUNDLE_VERSION=2.42.23
+
+ARG NETTY_VERSION=4.1.132.Final
+ARG LZ4_VERSION=1.10.1
+ARG AIRCOMPRESSOR_VERSION=2.0.3
+ARG DERBY_VERSION=10.17.1.0
 
 ENV SPARK_HOME=/opt/spark \
     VIRTUAL_ENV=/opt/venv \
@@ -26,20 +32,25 @@ ENV SPARK_HOME=/opt/spark \
     XDG_CACHE_HOME=/tmp/.cache \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
-RUN apt-get update && \
-    apt-get upgrade -y && \
+RUN set -eux; \
+    apt-get update; \
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
-      python3-venv && \
+      python3-venv; \
     rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv /opt/venv && \
+RUN set -eux; \
+    python3 -m venv /opt/venv; \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
-      wheel==0.46.3 && \
+      setuptools==78.1.1 \
+      wheel==0.46.3; \
     /opt/venv/bin/pip install --no-cache-dir \
       cloudpickle==3.1.2 \
       datasets==4.8.4 \
@@ -47,24 +58,79 @@ RUN python3 -m venv /opt/venv && \
       flytekitplugins-spark==1.16.15
 
 RUN set -eux; \
-    mkdir -p "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" \
-             "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}"; \
-    curl -fsSL \
-      "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar" \
-      -o "${SPARK_HOME}/jars/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar"; \
-    curl -fsSL \
-      "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" \
-      -o "${SPARK_HOME}/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; \
-    curl -fsSL \
-      "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_BUNDLE_VERSION}/bundle-${AWS_SDK_BUNDLE_VERSION}.jar" \
-      -o "${SPARK_HOME}/jars/bundle-${AWS_SDK_BUNDLE_VERSION}.jar"; \
+    mkdir -p \
+      "${SPARK_HOME}/jars" \
+      "${SPARK_HOME}/work-dir" \
+      "${HF_HOME}" \
+      "${HUGGINGFACE_HUB_CACHE}" \
+      "${HF_DATASETS_CACHE}" \
+      "${XDG_CACHE_HOME}"; \
+    \
+    download_maven_jar() { \
+      local group="$1"; \
+      local artifact="$2"; \
+      local version="$3"; \
+      local rel_path="${group//./\/}/${artifact}/${version}"; \
+      local url="https://repo1.maven.org/maven2/${rel_path}/${artifact}-${version}.jar"; \
+      local dest="${SPARK_HOME}/jars/${artifact}-${version}.jar"; \
+      local expected_sha512; \
+      curl -fsSLo "${dest}" "${url}"; \
+      expected_sha512="$(curl -fsSL "${url}.sha512" | tr -d '[:space:]')"; \
+      echo "${expected_sha512}  ${dest}" | sha512sum -c -; \
+    }; \
+    \
+    rm -f \
+      "${SPARK_HOME}/jars"/aircompressor-*.jar \
+      "${SPARK_HOME}/jars"/bundle-*.jar \
+      "${SPARK_HOME}/jars"/derby-*.jar \
+      "${SPARK_HOME}/jars"/hadoop-client-api-*.jar \
+      "${SPARK_HOME}/jars"/hadoop-client-runtime-*.jar \
+      "${SPARK_HOME}/jars"/lz4-java-*.jar \
+      "${SPARK_HOME}/jars"/netty-buffer-*.jar \
+      "${SPARK_HOME}/jars"/netty-codec-*.jar \
+      "${SPARK_HOME}/jars"/netty-common-*.jar \
+      "${SPARK_HOME}/jars"/netty-handler-*.jar \
+      "${SPARK_HOME}/jars"/netty-resolver-*.jar \
+      "${SPARK_HOME}/jars"/netty-transport-*.jar \
+      "${SPARK_HOME}/jars"/spark-connect-client-jvm_*.jar; \
+    \
+    download_maven_jar org.apache.iceberg iceberg-spark-runtime-4.0_2.13 "${ICEBERG_VERSION}"; \
+    download_maven_jar org.apache.hadoop hadoop-aws "${HADOOP_AWS_VERSION}"; \
+    download_maven_jar org.apache.hadoop hadoop-client-runtime "${HADOOP_CLIENT_RUNTIME_VERSION}"; \
+    download_maven_jar org.apache.hadoop hadoop-client-api "${HADOOP_CLIENT_API_VERSION}"; \
+    download_maven_jar software.amazon.awssdk bundle "${AWS_SDK_BUNDLE_VERSION}"; \
+    download_maven_jar io.netty netty-buffer "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-codec "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-codec-http "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-codec-http2 "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-common "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-handler "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-resolver "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-transport "${NETTY_VERSION}"; \
+    download_maven_jar io.netty netty-transport-native-unix-common "${NETTY_VERSION}"; \
+    download_maven_jar org.apache.derby derby "${DERBY_VERSION}"; \
+    download_maven_jar org.lz4 lz4-java "${LZ4_VERSION}"; \
+    download_maven_jar io.airlift aircompressor "${AIRCOMPRESSOR_VERSION}"; \
+    \
     rm -f \
       "${SPARK_HOME}/examples/jars/jackson-core-asl-1.9.13.jar" \
       "${SPARK_HOME}/examples/jars/jackson-mapper-asl-1.9.13.jar"; \
-    chmod -R a+rX "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${XDG_CACHE_HOME}"; \
-    chown -R 185:0 "${SPARK_HOME}" /opt/venv "${HF_HOME}" "${XDG_CACHE_HOME}"
+    \
+    chmod -R a+rX \
+      "${SPARK_HOME}/jars" \
+      "${SPARK_HOME}/work-dir" \
+      "${HF_HOME}" \
+      "${HUGGINGFACE_HUB_CACHE}" \
+      "${HF_DATASETS_CACHE}" \
+      "${XDG_CACHE_HOME}"; \
+    chown -R 185:0 \
+      "${SPARK_HOME}" \
+      /opt/venv \
+      "${HF_HOME}" \
+      "${XDG_CACHE_HOME}"
 
-COPY src /opt/app/src
+COPY --chown=185:0 src /opt/app/src
+
 ENV PYTHONPATH=/opt/app
 
 USER 185:0

@@ -1,2 +1,0 @@
-CVE-2024-6345 # setuptools<70 required by flytekit; package_index not used
-CVE-2025-47273 # same constraint; no runtime exposure

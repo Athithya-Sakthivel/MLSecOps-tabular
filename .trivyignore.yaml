@@ -1,0 +1,23 @@
+ignore:
+  # --- Python layer (explicitly accepted) ---
+  - vulnerability: CVE-2024-6345
+    reason: setuptools<70 required by flytekit; package_index not used
+
+  - vulnerability: CVE-2025-47273
+    reason: setuptools constraint; no PackageIndex usage in runtime
+
+  # --- Debian base image (python:3.12.13-slim-bookworm. Flyte requires py<3.13) ---
+  - vulnerability: CVE-2026-0861
+    reason: glibc (libc6/libc-bin); no direct usage of memalign from user input
+
+  - vulnerability: CVE-2025-69720
+    reason: ncurses/libtinfo; no TTY interaction in container
+
+  - vulnerability: CVE-2025-7458
+    reason: libsqlite3; no untrusted SQL execution path
+
+  - vulnerability: CVE-2026-29111
+    reason: libsystemd/libudev; container does not run systemd
+
+  - vulnerability: CVE-2023-45853
+    reason: zlib; no direct zip manipulation with untrusted input
