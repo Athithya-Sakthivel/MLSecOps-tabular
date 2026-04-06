@@ -1,15 +1,17 @@
 # Flyte task image for ELT and iceberg maintenance runtime.
+# Ubuntu 25.10 base, explicit apt upgrade, verified Spark archive download.
 # - wheel-only Python installs keep flytekit out of its source-build path
 # - vulnerable Spark/Hadoop jars are removed and replaced with fixed lines
-# - the same jar set is kept in /opt/spark/jars and pyspark's bundled jars
+# - the Spark jar set is kept in /opt/spark/jars and symlinked into pyspark's bundled jars
 
-FROM apache/spark:4.0.2-java21-python3@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
+FROM ubuntu:25.10@sha256:4a9232cc47bf99defcc8860ef6222c99773330367fcecbf21ba2edb0b810a31e
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-USER root
-
 ARG DEBIAN_FRONTEND=noninteractive
+
+ARG SPARK_VERSION=4.0.2
+ARG SPARK_PACKAGE=spark-4.0.2-bin-hadoop3
 
 ARG ICEBERG_VERSION=1.10.1
 ARG HADOOP_AWS_VERSION=3.4.3
@@ -26,9 +28,10 @@ ARG ZOOKEEPER_VERSION=3.9.5
 ARG LZ4_VERSION=1.10.1
 ARG AIRCOMPRESSOR_VERSION=2.0.3
 
-ENV SPARK_HOME=/opt/spark \
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
+    SPARK_HOME=/opt/spark \
     VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:$PATH \
+    PATH=/opt/spark/bin:/opt/venv/bin:$PATH \
     PYSPARK_PYTHON=/opt/venv/bin/python \
     PYSPARK_DRIVER_PYTHON=/opt/venv/bin/python \
     HOME=/tmp \
@@ -45,10 +48,22 @@ ENV SPARK_HOME=/opt/spark \
 
 RUN set -eux; \
     apt-get update; \
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       curl \
-      python3-venv; \
+      gosu \
+      krb5-user \
+      libnss3 \
+      libnss-wrapper \
+      libpam-modules \
+      net-tools \
+      openjdk-21-jre-headless \
+      procps \
+      python3 \
+      python3-pip \
+      python3-venv \
+      tini; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
@@ -57,12 +72,8 @@ RUN set -eux; \
       pip==26.0.1 \
       setuptools==78.1.1 \
       wheel==0.46.3; \
-    \
-    # install pyspark explicitly (source allowed)
     /opt/venv/bin/pip install \
-      pyspark==4.0.2; \
-    \
-    # everything else stays wheel-only
+      pyspark==${SPARK_VERSION}; \
     /opt/venv/bin/pip install --only-binary=:all: \
       cloudpickle==3.1.2 \
       datasets==4.8.4 \
@@ -70,9 +81,26 @@ RUN set -eux; \
       flytekitplugins-spark==1.16.15
 
 RUN set -eux; \
+    tmpdir="$(mktemp -d)"; \
+    curl -fsSL --retry 3 --connect-timeout 10 \
+      -o "${tmpdir}/${SPARK_PACKAGE}.tgz" \
+      "https://downloads.apache.org/spark/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz"; \
+    curl -fsSL --retry 3 --connect-timeout 10 \
+      -o "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512" \
+      "https://downloads.apache.org/spark/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz.sha512"; \
+    checksum="$(tr -d '[:space:]' < "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512")"; \
+    printf '%s  %s\n' "${checksum}" "${tmpdir}/${SPARK_PACKAGE}.tgz" | sha512sum -c -; \
+    rm -rf /opt/spark; \
+    mkdir -p /opt/spark; \
+    tar -xzf "${tmpdir}/${SPARK_PACKAGE}.tgz" -C /opt/spark --strip-components=1; \
+    rm -rf "${tmpdir}"
+
+RUN set -eux; \
     PYSPARK_JARS_DIR="$(find /opt/venv/lib -type d -path '*/site-packages/pyspark/jars' | head -n1)"; \
     test -n "${PYSPARK_JARS_DIR}"; \
-    JAR_DIRS=("${SPARK_HOME}/jars" "${PYSPARK_JARS_DIR}"); \
+    rm -rf "${PYSPARK_JARS_DIR}"; \
+    ln -s "${SPARK_HOME}/jars" "${PYSPARK_JARS_DIR}"; \
+    JAR_DIRS=("${SPARK_HOME}/jars"); \
     \
     for dir in "${JAR_DIRS[@]}"; do \
       mkdir -p "${dir}" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}"; \

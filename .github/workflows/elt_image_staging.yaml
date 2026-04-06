@@ -23,11 +23,12 @@ concurrency:
 
 env:
   TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+  TRIVY_CACHE_DIR: ${{ github.workspace }}/.trivy-cache
 
 jobs:
   build-scan-push:
     name: Build, scan, publish image
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-25.10
     timeout-minutes: 30
     environment: staging
 
@@ -42,6 +43,27 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Compute Trivy cache key
+        id: trivy-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "key=trivy-${RUNNER_OS}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Trivy cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${TRIVY_CACHE_DIR}"
+
+      - name: Restore Trivy cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: ${{ steps.trivy-key.outputs.key }}
+          restore-keys: |
+            trivy-${{ runner.os }}-
 
       - name: Compute image metadata
         id: image-meta
@@ -63,22 +85,10 @@ jobs:
             echo "image_staging=$IMAGE_STAGING"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Compute Trivy cache key
-        id: trivy-key
-        run: echo "key=trivy-${RUNNER_OS}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore Trivy cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: ~/.cache/trivy
-          key: ${{ steps.trivy-key.outputs.key }}
-          restore-keys: |
-            trivy-${{ runner.os }}-
-
       - name: Build image locally
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
-          context: .
+          context: ./
           file: src/workflows/ELT/Dockerfile.flyte_task
           load: true
           push: false
@@ -91,13 +101,16 @@ jobs:
       - name: Scan image with Trivy
         shell: bash
         run: |
+          set -euo pipefail
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$HOME/.cache/trivy:/root/.cache/" \
+            -v "${TRIVY_CACHE_DIR}:/trivy-cache" \
             -v "$PWD:/workspace" \
             -w /workspace \
             "${TRIVY_IMAGE}" \
             image \
+            --cache-dir /trivy-cache \
             --ignorefile /workspace/.trivyignore \
             --scanners vuln \
             --severity HIGH,CRITICAL \
@@ -116,6 +129,8 @@ jobs:
 
       - name: Push image tags
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
         run: |
+          set -euo pipefail
           docker push "${{ steps.image-meta.outputs.elt_task_image }}"
           docker push "${{ steps.image-meta.outputs.image_staging }}"

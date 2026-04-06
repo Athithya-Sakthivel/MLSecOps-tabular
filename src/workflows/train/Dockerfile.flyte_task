@@ -47,5 +47,5 @@ RUN python -m pip install --no-index --find-links=/wheels -r /opt/app/src/workfl
     chown -R appuser:appuser /opt/app
 
 USER appuser
-# 
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
