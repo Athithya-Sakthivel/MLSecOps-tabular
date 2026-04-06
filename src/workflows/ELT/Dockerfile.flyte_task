@@ -1,4 +1,4 @@
-# Flyte task image for ELT and iceberg maintenance runtime
+# Flyte task image for ELT and iceberg maintenance runtime.
 # - wheel-only Python installs keep flytekit out of its source-build path
 # - vulnerable Spark/Hadoop jars are removed and replaced with fixed lines
 # - the same jar set is kept in /opt/spark/jars and pyspark's bundled jars
