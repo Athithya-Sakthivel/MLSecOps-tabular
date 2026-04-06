@@ -1,9 +1,10 @@
-# Flyte task image for ELT and iceberg maintenance runtime.
+# Flyte task image for ELT and iceberg maintenance runtime
 # The image adds:
 # - minimal Python dependencies
 # - Iceberg + Hadoop AWS runtime jars
 # - writable cache directories for Hugging Face / datasets
 # apache/spark:4.0.2-scala2.13-java21-python3-ubuntu
+
 FROM apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
 
 USER root
