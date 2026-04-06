@@ -2,7 +2,7 @@
 # Ubuntu 24.04 base, explicit apt upgrade, verified Spark archive download.
 # - wheel-only Python installs keep flytekit out of its source-build path
 # - vulnerable Spark/Hadoop jars are removed and replaced with fixed lines
-# - Spark Python runtime is taken from the verified Spark distribution archive
+# - Spark Python runtime comes from the verified Spark distribution archive
 
 FROM ubuntu:24.04@sha256:186072bba1b2f436cbb91ef2567abca677337cfc786c86e107d25b7072feef0c
 
@@ -69,23 +69,6 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    tmpdir="$(mktemp -d)"; \
-    curl -fsSLo "${tmpdir}/${SPARK_PACKAGE}.tgz" \
-      "${SPARK_DOWNLOAD_BASE}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz"; \
-    curl -fsSLo "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512" \
-      "${SPARK_DOWNLOAD_BASE}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz.sha512"; \
-    expected="$(tr -d '[:space:]' < "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512")"; \
-    actual="$(sha512sum "${tmpdir}/${SPARK_PACKAGE}.tgz" | awk '{print $1}')"; \
-    test "${expected}" = "${actual}"; \
-    rm -rf /opt/spark; \
-    mkdir -p /opt/spark; \
-    tar -xzf "${tmpdir}/${SPARK_PACKAGE}.tgz" -C /opt/spark --strip-components=1; \
-    rm -rf "${tmpdir}"; \
-    PY4J_ZIP="$(find /opt/spark/python/lib -maxdepth 1 -type f -name 'py4j-*-src.zip' -print -quit)"; \
-    test -n "${PY4J_ZIP}"; \
-    ln -sf "$(basename "${PY4J_ZIP}")" /opt/spark/python/lib/py4j-src.zip
-
-RUN set -eux; \
     python3 -m venv /opt/venv; \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
@@ -95,25 +78,38 @@ RUN set -eux; \
       cloudpickle==3.1.2 \
       datasets==4.8.4 \
       flytekit==1.16.15; \
-    /opt/venv/bin/pip install --no-deps \
+    /opt/venv/bin/pip install --only-binary=:all: --no-deps \
       flytekitplugins-spark==1.16.15
 
 RUN set -eux; \
+    tmpdir="$(mktemp -d)"; \
+    trap 'rm -rf "${tmpdir}"' EXIT; \
+    curl -fsSLo "${tmpdir}/${SPARK_PACKAGE}.tgz" \
+      "${SPARK_DOWNLOAD_BASE}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz"; \
+    curl -fsSLo "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512" \
+      "${SPARK_DOWNLOAD_BASE}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz.sha512"; \
+    expected="$(awk 'NF{print $1; exit}' "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512")"; \
+    actual="$(sha512sum "${tmpdir}/${SPARK_PACKAGE}.tgz" | awk '{print $1}')"; \
+    test "${expected}" = "${actual}"; \
+    rm -rf /opt/spark; \
+    mkdir -p /opt/spark; \
+    tar -xzf "${tmpdir}/${SPARK_PACKAGE}.tgz" -C /opt/spark --strip-components=1; \
+    PY4J_ZIP="$(find /opt/spark/python/lib -maxdepth 1 -type f -name 'py4j-*-src.zip' -print -quit)"; \
+    test -n "${PY4J_ZIP}"; \
+    ln -sf "$(basename "${PY4J_ZIP}")" /opt/spark/python/lib/py4j-src.zip
+
+RUN set -eux; \
     SPARK_JARS_DIR="${SPARK_HOME}/jars"; \
-    mkdir -p \
-      "${SPARK_HOME}/work-dir" \
-      "${HF_HOME}" \
-      "${HUGGINGFACE_HUB_CACHE}" \
-      "${HF_DATASETS_CACHE}" \
-      "${XDG_CACHE_HOME}"; \
+    mkdir -p "${SPARK_JARS_DIR}" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}"; \
     \
-    verify_download() { \
+    verify_checksum() { \
       local file="$1"; \
       local checksum_file="$2"; \
       local algo="$3"; \
       local expected actual; \
-      expected="$(tr -d '[:space:]' < "${checksum_file}")"; \
+      expected="$(awk 'NF{print $1; exit}' "${checksum_file}")"; \
       actual="$("${algo}" "${file}" | awk '{print $1}')"; \
+      test -n "${expected}"; \
       test "${expected}" = "${actual}"; \
     }; \
     \
@@ -130,9 +126,9 @@ RUN set -eux; \
       tmpfile="${tmpdir}/${filename}"; \
       curl -fsSLo "${tmpfile}" "${base_url}/${filename}"; \
       if curl -fsSLo "${tmpfile}.sha512" "${base_url}/${filename}.sha512"; then \
-        verify_download "${tmpfile}" "${tmpfile}.sha512" sha512sum; \
+        verify_checksum "${tmpfile}" "${tmpfile}.sha512" sha512sum; \
       elif curl -fsSLo "${tmpfile}.sha1" "${base_url}/${filename}.sha1"; then \
-        verify_download "${tmpfile}" "${tmpfile}.sha1" sha1sum; \
+        verify_checksum "${tmpfile}" "${tmpfile}.sha1" sha1sum; \
       else \
         echo "ERROR: missing checksum for ${artifact}-${version}" >&2; \
         exit 1; \
