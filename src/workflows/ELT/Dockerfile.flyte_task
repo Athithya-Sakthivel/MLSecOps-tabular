@@ -1,40 +1,21 @@
-# Flyte task image for ELT and iceberg maintenance.
-# Ubuntu 24.04 base, explicit apt upgrade, verified Spark download.
-# - wheel-only Python installs keep flytekit out of its source-build path
-# - vulnerable Spark example jars are removed
-# - Spark Python runtime comes from the verified Spark distribution archive
-# - embedded Avro is stripped from hadoop-client-runtime to avoid shaded CVE exposure
-# - Derby jars are removed entirely
+# Flyte task image for ELT and iceberg maintenance runtime
+# The image adds:
+# - minimal Python dependencies
+# - Iceberg + Hadoop AWS runtime jars
+# - writable cache directories for Hugging Face / datasets
+# apache/spark:4.0.2-scala2.13-java21-python3-ubuntu
+FROM apache/spark@sha256:39b6b2049398ae00acd5b475f45c6d17fdafc1442ab80806f658de8d0efa3ab0
 
-FROM ubuntu:24.04@sha256:186072bba1b2f436cbb91ef2567abca677337cfc786c86e107d25b7072feef0c
-
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+USER root
 
 ARG DEBIAN_FRONTEND=noninteractive
-
-ARG SPARK_VERSION=4.0.2
-ARG SPARK_PACKAGE=spark-4.0.2-bin-hadoop3
-ARG SPARK_PRIMARY_DOWNLOAD_BASE=https://downloads.apache.org/spark
-ARG SPARK_FALLBACK_DOWNLOAD_BASE=https://archive.apache.org/dist/spark
-
 ARG ICEBERG_VERSION=1.10.1
-ARG HADOOP_AWS_VERSION=3.4.3
-ARG HADOOP_CLIENT_RUNTIME_VERSION=3.4.3
-ARG HADOOP_CLIENT_API_VERSION=3.4.3
-ARG AWS_SDK_BUNDLE_VERSION=2.35.4
+ARG HADOOP_AWS_VERSION=3.4.1
+ARG AWS_SDK_BUNDLE_VERSION=2.23.5
 
-ARG NETTY_VERSION=4.1.132.Final
-ARG AVRO_VERSION=1.11.4
-ARG BEANUTILS_VERSION=1.11.0
-ARG JACKSON_CORE_VERSION=2.15.0
-ARG ZOOKEEPER_VERSION=3.9.5
-ARG LZ4_VERSION=1.10.1
-ARG AIRCOMPRESSOR_VERSION=2.0.3
-
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
-    SPARK_HOME=/opt/spark \
+ENV SPARK_HOME=/opt/spark \
     VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/spark/bin:/opt/venv/bin:$PATH \
+    PATH=/opt/venv/bin:$PATH \
     PYSPARK_PYTHON=/opt/venv/bin/python \
     PYSPARK_DRIVER_PYTHON=/opt/venv/bin/python \
     HOME=/tmp \
@@ -45,196 +26,40 @@ ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
     XDG_CACHE_HOME=/tmp/.cache \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/opt/spark/python/lib/pyspark.zip:/opt/spark/python/lib/py4j-src.zip:/opt/app
+    PYTHONUNBUFFERED=1
 
-RUN set -eux; \
-    apt-get update; \
-    apt-get upgrade -y; \
-    apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
-      gosu \
-      krb5-user \
-      libnss3 \
-      libnss-wrapper \
-      libpam-modules \
-      net-tools \
-      openjdk-21-jre-headless \
-      procps \
-      python3 \
-      python3-pip \
-      python3-venv \
-      tini; \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
-    python3 -m venv /opt/venv; \
+RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
-      setuptools==69.5.1 \
-      wheel==0.46.3; \
-    /opt/venv/bin/pip install --only-binary=:all: \
+      wheel==0.46.3 && \
+    /opt/venv/bin/pip install --no-cache-dir \
       cloudpickle==3.1.2 \
       datasets==4.8.4 \
-      flytekit==1.16.15; \
-    /opt/venv/bin/pip install --only-binary=:all: --no-deps \
+      flytekit==1.16.15 \
       flytekitplugins-spark==1.16.15
 
 RUN set -eux; \
-    tmpdir="$(mktemp -d)"; \
-    trap 'rm -rf "${tmpdir}"' EXIT; \
-    for base in "${SPARK_PRIMARY_DOWNLOAD_BASE}" "${SPARK_FALLBACK_DOWNLOAD_BASE}"; do \
-      if curl -fL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 900 \
-          -o "${tmpdir}/${SPARK_PACKAGE}.tgz" \
-          "${base}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz"; then \
-        if curl -fsS --connect-timeout 10 --max-time 30 \
-            -o "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512" \
-            "${base}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz.sha512"; then \
-          expected="$(awk 'NF{print $1; exit}' "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512")"; \
-          actual="$(sha512sum "${tmpdir}/${SPARK_PACKAGE}.tgz" | awk '{print $1}')"; \
-          test "${expected}" = "${actual}"; \
-          break; \
-        fi; \
-      fi; \
-    done; \
-    test -s "${tmpdir}/${SPARK_PACKAGE}.tgz"; \
-    rm -rf /opt/spark; \
-    mkdir -p /opt/spark; \
-    tar -xzf "${tmpdir}/${SPARK_PACKAGE}.tgz" -C /opt/spark --strip-components=1; \
-    test -x /opt/spark/bin/spark-submit; \
-    PY4J_ZIP="$(find /opt/spark/python/lib -maxdepth 1 -type f -name 'py4j-*-src.zip' -print -quit)"; \
-    test -n "${PY4J_ZIP}"; \
-    ln -sf "$(basename "${PY4J_ZIP}")" /opt/spark/python/lib/py4j-src.zip
+    mkdir -p "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" \
+             "${HF_HOME}" "${HUGGINGFACE_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${XDG_CACHE_HOME}"; \
+    curl -fsSL \
+      "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-4.0_2.13/${ICEBERG_VERSION}/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar" \
+      -o "${SPARK_HOME}/jars/iceberg-spark-runtime-4.0_2.13-${ICEBERG_VERSION}.jar"; \
+    curl -fsSL \
+      "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/${HADOOP_AWS_VERSION}/hadoop-aws-${HADOOP_AWS_VERSION}.jar" \
+      -o "${SPARK_HOME}/jars/hadoop-aws-${HADOOP_AWS_VERSION}.jar"; \
+    curl -fsSL \
+      "https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/${AWS_SDK_BUNDLE_VERSION}/bundle-${AWS_SDK_BUNDLE_VERSION}.jar" \
+      -o "${SPARK_HOME}/jars/bundle-${AWS_SDK_BUNDLE_VERSION}.jar"; \
+    chmod -R a+rX "${SPARK_HOME}/jars" "${SPARK_HOME}/work-dir" "${HF_HOME}" "${XDG_CACHE_HOME}"; \
+    chown -R 185:0 "${SPARK_HOME}" /opt/venv "${HF_HOME}" "${XDG_CACHE_HOME}"
 
-RUN set -eux; \
-    SPARK_JARS_DIR="${SPARK_HOME}/jars"; \
-    mkdir -p \
-      "${SPARK_JARS_DIR}" \
-      "${SPARK_HOME}/work-dir" \
-      "${HF_HOME}" \
-      "${HUGGINGFACE_HUB_CACHE}" \
-      "${HF_DATASETS_CACHE}" \
-      "${XDG_CACHE_HOME}"; \
-    \
-    verify_checksum() { \
-      local file="$1"; \
-      local checksum_file="$2"; \
-      local algo="$3"; \
-      local expected actual; \
-      expected="$(awk 'NF{print $1; exit}' "${checksum_file}")"; \
-      actual="$("${algo}" "${file}" | awk '{print $1}')"; \
-      test -n "${expected}"; \
-      test "${expected}" = "${actual}"; \
-    }; \
-    \
-    fetch_checksum() { \
-      local url="$1"; \
-      local dest="$2"; \
-      curl -fsS --connect-timeout 10 --max-time 30 -o "${dest}" "${url}"; \
-    }; \
-    \
-    download_maven_jar() { \
-      local group="$1"; \
-      local artifact="$2"; \
-      local version="$3"; \
-      local classifier="${4:-}"; \
-      local rel_path="${group//./\/}/${artifact}/${version}"; \
-      local filename="${artifact}-${version}${classifier:+-${classifier}}.jar"; \
-      local base_url="https://repo.maven.apache.org/maven2/${rel_path}"; \
-      local tmpdir tmpfile; \
-      tmpdir="$(mktemp -d)"; \
-      tmpfile="${tmpdir}/${filename}"; \
-      curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 300 \
-        -o "${tmpfile}" "${base_url}/${filename}"; \
-      if fetch_checksum "${base_url}/${filename}.sha512" "${tmpfile}.sha512"; then \
-        verify_checksum "${tmpfile}" "${tmpfile}.sha512" sha512sum; \
-      elif fetch_checksum "${base_url}/${filename}.sha1" "${tmpfile}.sha1"; then \
-        verify_checksum "${tmpfile}" "${tmpfile}.sha1" sha1sum; \
-      else \
-        echo "ERROR: missing checksum for ${artifact}-${version}" >&2; \
-        exit 1; \
-      fi; \
-      cp -f "${tmpfile}" "${SPARK_JARS_DIR}/${filename}"; \
-      rm -rf "${tmpdir}"; \
-    }; \
-    \
-    remove_matching_jars() { \
-      local pattern="$1"; \
-      find "${SPARK_JARS_DIR}" -maxdepth 1 -type f -name "${pattern}" -delete; \
-    }; \
-    \
-    strip_zip_prefix_from_matching_jars() { \
-      local pattern="$1"; \
-      local prefix="$2"; \
-      find "${SPARK_JARS_DIR}" -maxdepth 1 -type f -name "${pattern}" -print0 | \
-        while IFS= read -r -d '' jar_file; do \
-          python3 -c 'import os,sys,zipfile; jar_path=sys.argv[1]; prefix=sys.argv[2]; tmp_path=jar_path+".tmp"; src=zipfile.ZipFile(jar_path,"r"); dst=zipfile.ZipFile(tmp_path,"w",compression=zipfile.ZIP_DEFLATED); [dst.writestr(info, src.read(info.filename)) for info in src.infolist() if not info.filename.startswith(prefix)]; dst.close(); src.close(); os.replace(tmp_path, jar_path)' "$jar_file" "$prefix"; \
-        done; \
-    }; \
-    \
-    find "${SPARK_HOME}" -type f \( \
-      -name 'jackson-core-asl-1.9.13.jar' -o \
-      -name 'jackson-mapper-asl-1.9.13.jar' \
-    \) -delete; \
-    remove_matching_jars 'spark-connect-client-jvm_*.jar'; \
-    remove_matching_jars 'spark-*-yarn-shuffle.jar'; \
-    remove_matching_jars 'avro-*.jar'; \
-    remove_matching_jars 'derby-*.jar'; \
-    \
-    download_maven_jar org.apache.iceberg iceberg-spark-runtime-4.0_2.13 "${ICEBERG_VERSION}"; \
-    download_maven_jar org.apache.hadoop hadoop-aws "${HADOOP_AWS_VERSION}"; \
-    download_maven_jar org.apache.hadoop hadoop-client-runtime "${HADOOP_CLIENT_RUNTIME_VERSION}"; \
-    download_maven_jar org.apache.hadoop hadoop-client-api "${HADOOP_CLIENT_API_VERSION}"; \
-    download_maven_jar software.amazon.awssdk bundle "${AWS_SDK_BUNDLE_VERSION}"; \
-    \
-    download_maven_jar org.apache.avro avro "${AVRO_VERSION}"; \
-    download_maven_jar commons-beanutils commons-beanutils "${BEANUTILS_VERSION}"; \
-    download_maven_jar com.fasterxml.jackson.core jackson-core "${JACKSON_CORE_VERSION}"; \
-    download_maven_jar org.apache.zookeeper zookeeper "${ZOOKEEPER_VERSION}"; \
-    download_maven_jar at.yawk.lz4 lz4-java "${LZ4_VERSION}"; \
-    download_maven_jar io.airlift aircompressor "${AIRCOMPRESSOR_VERSION}"; \
-    \
-    download_maven_jar io.netty netty-buffer "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-codec "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-codec-dns "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-codec-http "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-codec-http2 "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-codec-socks "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-common "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-handler "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-handler-proxy "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-resolver "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-resolver-dns "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-transport "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-transport-classes-epoll "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-transport-native-unix-common "${NETTY_VERSION}"; \
-    download_maven_jar io.netty netty-transport-native-epoll "${NETTY_VERSION}" linux-x86_64; \
-    \
-    strip_zip_prefix_from_matching_jars 'hadoop-client-runtime-*.jar' 'org/apache/avro/'; \
-    \
-    test -z "$(find "${SPARK_HOME}" -type f \( -name 'jackson-core-asl-1.9.13.jar' -o -name 'jackson-mapper-asl-1.9.13.jar' \) -print -quit)"; \
-    test -z "$(find "${SPARK_JARS_DIR}" -maxdepth 1 -type f \( -name 'spark-connect-client-jvm_*.jar' -o -name 'spark-*-yarn-shuffle.jar' \) -print -quit)"; \
-    test -z "$(find "${SPARK_JARS_DIR}" -maxdepth 1 -type f -name 'avro-*.jar' ! -name "avro-${AVRO_VERSION}.jar" -print -quit)"; \
-    test -z "$(find "${SPARK_JARS_DIR}" -maxdepth 1 -type f -name 'derby-*.jar' -print -quit)"; \
-    \
-    chmod -R a+rX \
-      "${SPARK_HOME}" \
-      /opt/venv \
-      "${HF_HOME}" \
-      "${HUGGINGFACE_HUB_CACHE}" \
-      "${HF_DATASETS_CACHE}" \
-      "${XDG_CACHE_HOME}"; \
-    chown -R 185:0 \
-      "${SPARK_HOME}" \
-      /opt/venv \
-      "${HF_HOME}" \
-      "${XDG_CACHE_HOME}"
-
-COPY --chown=185:0 src /opt/app/src
-
+COPY src /opt/app/src
 ENV PYTHONPATH=/opt/app
 
 USER 185:0

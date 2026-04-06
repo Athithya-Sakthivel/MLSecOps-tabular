@@ -19,3 +19,4 @@ CVE-2025-67721 # shaded aircompressor inside iceberg-spark-runtime-4.0_2.13-1.10
 CVE-2026-33870 # shaded Netty HTTP/1.1 codec inside Spark/AWS shaded jars; this image does not expose a Netty HTTP/1.1 server
 CVE-2025-55163 # shaded Netty HTTP/2 codec inside Spark/AWS shaded jars; this image does not expose a Netty HTTP/2 server
 CVE-2026-33871 # shaded Netty HTTP/2 codec inside Spark/AWS shaded jars; this image does not expose a Netty HTTP/2 server
+CVE-2024-47561 # shaded Avro inside hadoop-client-runtime; runtime-exposed only if Avro schema parsing/serialization is used
