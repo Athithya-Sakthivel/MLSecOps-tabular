@@ -12,18 +12,18 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 ARG SPARK_VERSION=4.0.2
 ARG SPARK_PACKAGE=spark-4.0.2-bin-hadoop3
-ARG SPARK_DOWNLOAD_BASE=https://archive.apache.org/dist/spark
+ARG SPARK_DOWNLOAD_BASE=https://downloads.apache.org/spark
 
 ARG ICEBERG_VERSION=1.10.1
-ARG HADOOP_AWS_VERSION=3.5.0
-ARG HADOOP_CLIENT_RUNTIME_VERSION=3.5.0
-ARG HADOOP_CLIENT_API_VERSION=3.5.0
-ARG AWS_SDK_BUNDLE_VERSION=2.42.28
+ARG HADOOP_AWS_VERSION=3.4.3
+ARG HADOOP_CLIENT_RUNTIME_VERSION=3.4.3
+ARG HADOOP_CLIENT_API_VERSION=3.4.3
+ARG AWS_SDK_BUNDLE_VERSION=2.35.4
 
 ARG NETTY_VERSION=4.1.132.Final
-ARG AVRO_VERSION=1.11.5
+ARG AVRO_VERSION=1.11.4
 ARG BEANUTILS_VERSION=1.11.0
-ARG JACKSON_CORE_VERSION=2.18.6
+ARG JACKSON_CORE_VERSION=2.15.0
 ARG DERBY_VERSION=10.17.1.0
 ARG ZOOKEEPER_VERSION=3.9.5
 ARG LZ4_VERSION=1.10.1
@@ -72,7 +72,7 @@ RUN set -eux; \
     python3 -m venv /opt/venv; \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
-      setuptools==78.1.1 \
+      setuptools==69.5.1 \
       wheel==0.46.3; \
     /opt/venv/bin/pip install --only-binary=:all: \
       cloudpickle==3.1.2 \
@@ -84,9 +84,11 @@ RUN set -eux; \
 RUN set -eux; \
     tmpdir="$(mktemp -d)"; \
     trap 'rm -rf "${tmpdir}"' EXIT; \
-    curl -fsSLo "${tmpdir}/${SPARK_PACKAGE}.tgz" \
+    curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 900 \
+      -o "${tmpdir}/${SPARK_PACKAGE}.tgz" \
       "${SPARK_DOWNLOAD_BASE}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz"; \
-    curl -fsSLo "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512" \
+    curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 300 \
+      -o "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512" \
       "${SPARK_DOWNLOAD_BASE}/spark-${SPARK_VERSION}/${SPARK_PACKAGE}.tgz.sha512"; \
     expected="$(awk 'NF{print $1; exit}' "${tmpdir}/${SPARK_PACKAGE}.tgz.sha512")"; \
     actual="$(sha512sum "${tmpdir}/${SPARK_PACKAGE}.tgz" | awk '{print $1}')"; \
@@ -131,10 +133,13 @@ RUN set -eux; \
       local tmpdir tmpfile; \
       tmpdir="$(mktemp -d)"; \
       tmpfile="${tmpdir}/${filename}"; \
-      curl -fsSLo "${tmpfile}" "${base_url}/${filename}"; \
-      if curl -fsSLo "${tmpfile}.sha512" "${base_url}/${filename}.sha512"; then \
+      curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 300 \
+        -o "${tmpfile}" "${base_url}/${filename}"; \
+      if curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+          -o "${tmpfile}.sha512" "${base_url}/${filename}.sha512"; then \
         verify_checksum "${tmpfile}" "${tmpfile}.sha512" sha512sum; \
-      elif curl -fsSLo "${tmpfile}.sha1" "${base_url}/${filename}.sha1"; then \
+      elif curl -fL --retry 5 --retry-all-errors --connect-timeout 15 --max-time 120 \
+          -o "${tmpfile}.sha1" "${base_url}/${filename}.sha1"; then \
         verify_checksum "${tmpfile}" "${tmpfile}.sha1" sha1sum; \
       else \
         echo "ERROR: missing checksum for ${artifact}-${version}" >&2; \
