@@ -74,7 +74,7 @@ RUN set -eux; \
     python3 -m venv /opt/venv; \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
-      setuptools==78.1.1 \
+      setuptools==69.5.1 \
       wheel==0.46.3; \
     /opt/venv/bin/pip install --only-binary=:all: \
       cloudpickle==3.1.2 \
@@ -171,23 +171,7 @@ RUN set -eux; \
       local prefix="$2"; \
       find "${SPARK_JARS_DIR}" -maxdepth 1 -type f -name "${pattern}" -print0 | \
         while IFS= read -r -d '' jar_file; do \
-          python3 - "$jar_file" "$prefix" <<'PY'; \
-import os \
-import sys \
-import zipfile \
-\
-jar_path = sys.argv[1] \
-prefix = sys.argv[2] \
-tmp_path = jar_path + ".tmp" \
-\
-with zipfile.ZipFile(jar_path, "r") as src, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as dst: \
-    for info in src.infolist(): \
-        if info.filename.startswith(prefix): \
-            continue \
-        dst.writestr(info, src.read(info.filename)) \
-\
-os.replace(tmp_path, jar_path) \
-PY \
+          python3 -c 'import os,sys,zipfile; jar_path=sys.argv[1]; prefix=sys.argv[2]; tmp_path=jar_path+".tmp"; src=zipfile.ZipFile(jar_path,"r"); dst=zipfile.ZipFile(tmp_path,"w",compression=zipfile.ZIP_DEFLATED); [dst.writestr(info, src.read(info.filename)) for info in src.infolist() if not info.filename.startswith(prefix)]; dst.close(); src.close(); os.replace(tmp_path, jar_path)' "$jar_file" "$prefix"; \
         done; \
     }; \
     \
