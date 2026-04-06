@@ -1,10 +1,10 @@
 # Flyte task image for ELT and iceberg maintenance runtime.
-# Ubuntu 25.10 as base image, explicit apt upgrade, verified Spark archive download.
+# Ubuntu 24.04 base, explicit apt upgrade, verified Spark archive download.
 # - wheel-only Python installs keep flytekit out of its source-build path
 # - vulnerable Spark/Hadoop jars are removed and replaced with fixed lines
 # - the Spark jar set is kept in /opt/spark/jars and symlinked into pyspark's bundled jars
 
-FROM ubuntu:25.10@sha256:4a9232cc47bf99defcc8860ef6222c99773330367fcecbf21ba2edb0b810a31e
+FROM ubuntu:24.04@sha256:186072bba1b2f436cbb91ef2567abca677337cfc786c86e107d25b7072feef0c
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -70,15 +70,15 @@ RUN set -eux; \
     python3 -m venv /opt/venv; \
     /opt/venv/bin/pip install --upgrade \
       pip==26.0.1 \
-      setuptools==78.1.1 \
+      setuptools==69.5.1 \
       wheel==0.46.3; \
     /opt/venv/bin/pip install \
       pyspark==${SPARK_VERSION}; \
     /opt/venv/bin/pip install --only-binary=:all: \
       cloudpickle==3.1.2 \
       datasets==4.8.4 \
-      flytekit==1.16.15 \
-      flytekitplugins-spark==1.16.15
+      flytekit==1.16.16 \
+      flytekitplugins-spark==1.16.16
 
 RUN set -eux; \
     tmpdir="$(mktemp -d)"; \
