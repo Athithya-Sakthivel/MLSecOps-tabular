@@ -93,6 +93,7 @@ jobs:
           file: src/workflows/ELT/Dockerfile.flyte_task
           load: true
           push: false
+          pull: true
           tags: |
             ${{ steps.image-meta.outputs.elt_task_image }}
             ${{ steps.image-meta.outputs.image_staging }}
