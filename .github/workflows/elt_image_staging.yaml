@@ -23,6 +23,7 @@ concurrency:
 
 env:
   TRIVY_IMAGE: ghcr.io/athithya-sakthivel/trivy:0.69.3-safe@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+  TRIVY_CACHE_DIR: /tmp/trivy-cache
 
 jobs:
   build-scan-push:
@@ -33,16 +34,15 @@ jobs:
 
     env:
       GIT_PAT: ${{ secrets.GIT_PAT }}
-      TRIVY_CACHE_DIR: ${{ runner.temp }}/trivy-cache
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           fetch-depth: 1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd
 
       - name: Compute Trivy cache key
         id: trivy-key
@@ -52,13 +52,10 @@ jobs:
           echo "key=trivy-${RUNNER_OS}-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
 
       - name: Prepare Trivy cache
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${TRIVY_CACHE_DIR}"
+        run: mkdir -p "${TRIVY_CACHE_DIR}"
 
       - name: Restore Trivy cache
-        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7
         with:
           path: ${{ env.TRIVY_CACHE_DIR }}
           key: ${{ steps.trivy-key.outputs.key }}
@@ -67,14 +64,13 @@ jobs:
 
       - name: Compute image metadata
         id: image-meta
-        shell: bash
         run: |
           set -euo pipefail
 
           GHCR_USER="${GHCR_USER:-athithya-sakthivel}"
           IMAGE_NAME="${IMAGE_NAME:-flyte-elt-task}"
           IMAGE_TAG="${IMAGE_TAG:-$(TZ=Asia/Kolkata date +%Y-%m-%d-%H-%M)--$(git rev-parse --short HEAD)}"
-          ELT_TASK_IMAGE="${ELT_TASK_IMAGE:-ghcr.io/${GHCR_USER}/${IMAGE_NAME}:${IMAGE_TAG}}"
+          ELT_TASK_IMAGE="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
           IMAGE_STAGING="ghcr.io/${GHCR_USER}/${IMAGE_NAME}:staging"
 
           {
@@ -87,7 +83,7 @@ jobs:
 
       - name: Build image locally
         id: build-image
-        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294
         with:
           context: ./
           file: src/workflows/ELT/Dockerfile.flyte_task
@@ -101,7 +97,6 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan image with Trivy
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -131,7 +126,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121
         with:
           registry: ghcr.io
           username: ${{ steps.image-meta.outputs.ghcr_user }}
@@ -139,7 +134,6 @@ jobs:
 
       - name: Push image tags
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: bash
         run: |
           set -euo pipefail
           docker push "${{ steps.image-meta.outputs.elt_task_image }}"

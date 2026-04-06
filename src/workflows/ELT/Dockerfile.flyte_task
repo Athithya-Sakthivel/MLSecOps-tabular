@@ -1,4 +1,4 @@
-# Flyte task image for ELT and iceberg maintenance
+# Flyte task image for ELT and iceberg maintenance.
 # Ubuntu 24.04 base, explicit apt upgrade, verified Spark archive download
 # - wheel-only Python installs keep flytekit out of its source-build path
 # - vulnerable Spark/Hadoop jars are removed and replaced with fixed lines
