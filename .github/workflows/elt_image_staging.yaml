@@ -120,7 +120,6 @@ jobs:
             --severity CRITICAL \
             --exit-on-eol 1 \
             --exit-code 1 \
-            --quiet \
             "${ignore_args[@]}" \
             "${scan_image}"
 
