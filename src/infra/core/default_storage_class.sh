@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stable installer for a single default StorageClass named "default-storage-class". Removes existing defaults if exists.
-# Supports: kind (local-path), AWS (ebs.csi.aws.com), GKE (pd.csi.storage.gke.io), AKS (disk.csi.azure.com)
+# Supports: kind (local-path), AWS (ebs.csi.aws.com)
 # Additionally: renders the StorageClass YAML into src/manifests/storageclass/
 
 set -euo pipefail

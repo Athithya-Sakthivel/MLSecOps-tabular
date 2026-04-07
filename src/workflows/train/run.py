@@ -1,3 +1,4 @@
+# src/workflows/train/run.py
 from __future__ import annotations
 
 import argparse
@@ -28,8 +29,7 @@ if str(SRC_ROOT) not in sys.path:
 
 
 def _env_str(name: str, default: str = "") -> str:
-    value = os.environ.get(name, default)
-    return value.strip()
+    return os.environ.get(name, default).strip()
 
 
 def _env_bool(name: str, default: str = "0") -> bool:
@@ -41,6 +41,7 @@ REMOTE_DOMAIN = _env_str("REMOTE_DOMAIN", "development")
 TASK_NAMESPACE = _env_str("TRAIN_NAMESPACE", f"{REMOTE_PROJECT}-{REMOTE_DOMAIN}")
 
 K8S_CLUSTER = _env_str("K8S_CLUSTER", "kind").lower()
+
 TRAIN_PROFILE = _env_str(
     "TRAIN_PROFILE",
     _env_str(
@@ -57,9 +58,7 @@ TRAIN_SERVICE_ACCOUNT = _env_str("TRAIN_SERVICE_ACCOUNT", "ray") or "ray"
 TRAIN_TASK_IMAGE = os.environ.get("TRAIN_TASK_IMAGE")
 if not TRAIN_TASK_IMAGE:
     raise RuntimeError("TRAIN_TASK_IMAGE environment variable must be set and non-empty")
-
-USE_IAM = _env_bool("USE_IAM", "0")
-
+    
 WORKFLOW_SOURCE_FILE = SRC_ROOT / "workflows" / "train" / "launch_plans.py"
 WORKFLOW_SOURCE_REL = WORKFLOW_SOURCE_FILE.relative_to(SRC_ROOT)
 WORKFLOW_IMPORT_MODULE = _env_str("WORKFLOW_IMPORT_MODULE", "workflows.train.launch_plans")
@@ -109,22 +108,6 @@ def fatal(msg: str) -> NoReturn:
 def require_bin(name: str) -> None:
     if shutil.which(name) is None:
         fatal(f"{name} not found in PATH")
-
-
-def require_aws_credentials_if_static() -> None:
-    if USE_IAM:
-        return
-
-    missing = []
-    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
-        if not _env_str(key):
-            missing.append(key)
-
-    if missing:
-        fatal(
-            "USE_IAM=false requires AWS credentials in the local environment: "
-            + ", ".join(missing)
-        )
 
 
 def run_cmd(
@@ -324,6 +307,30 @@ def _quota_values() -> dict[str, str]:
     }
 
 
+def _ensure_namespace() -> None:
+    run_cmd(
+        [
+            "kubectl",
+            "create",
+            "namespace",
+            TASK_NAMESPACE,
+            "--dry-run=client",
+            "-o",
+            "yaml",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    run_cmd(
+        ["kubectl", "apply", "-f", "-"],
+        input_text=f"""apiVersion: v1
+kind: Namespace
+metadata:
+  name: {TASK_NAMESPACE}
+""",
+    )
+
+
 def _bootstrap_manifest() -> str:
     q = _quota_values()
     return f"""apiVersion: v1
@@ -403,16 +410,8 @@ def bootstrap_manifest_quota_line() -> str:
 def bootstrap_target_namespace() -> None:
     require_bin("kubectl")
     log(f"Applying namespace, RBAC, and quota bootstrap for {TASK_NAMESPACE}")
-    run_cmd(
-        ["kubectl", "apply", "-f", "-"],
-        input_text=f"""apiVersion: v1
-kind: Namespace
-metadata:
-  name: {TASK_NAMESPACE}
----
-{_bootstrap_manifest()}
-""",
-    )
+    _ensure_namespace()
+    run_cmd(["kubectl", "apply", "-f", "-"], input_text=_bootstrap_manifest())
     log(f"Bootstrap applied for {TASK_NAMESPACE} with quota: {bootstrap_manifest_quota_line()}")
 
 
@@ -480,7 +479,7 @@ def registration_tree_files() -> list[Path]:
         files.append(path)
     for extra in (
         SRC_ROOT / "workflows" / "train" / "requirements.txt",
-        SRC_ROOT / "workflows" / "train" / "Dockerfile.flyte_task",
+        SRC_ROOT / "workflows" / "train" / "Dockerfile.task_image",
     ):
         if extra.is_file():
             files.append(extra)
@@ -593,7 +592,6 @@ def register_entities() -> str:
 
 
 def require_preflight_for_execution() -> None:
-    require_aws_credentials_if_static()
     ensure_namespace_bootstrap_ready()
 
 
@@ -676,6 +674,176 @@ def execute_launch_plan(*, latest: bool | None = None, version: str | None = Non
         exec_spec_file.unlink(missing_ok=True)
 
 
+def get_execution_pods(execution_id: str) -> list[str]:
+    cp = run_cmd(
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-n",
+            TASK_NAMESPACE,
+            "-l",
+            f"execution-id={execution_id}",
+            "-o",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
+        ],
+        check=False,
+        capture_output=True,
+    )
+    pods = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
+    if pods:
+        return pods
+
+    cp = run_cmd(
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-n",
+            TASK_NAMESPACE,
+            "-o",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
+        ],
+        check=False,
+        capture_output=True,
+    )
+    return [line.strip() for line in cp.stdout.splitlines() if execution_id in line]
+
+
+def get_execution_rayjobs(execution_id: str) -> list[str]:
+    cp = run_cmd(
+        [
+            "kubectl",
+            "get",
+            "rayjobs",
+            "-n",
+            TASK_NAMESPACE,
+            "-l",
+            f"execution-id={execution_id}",
+            "-o",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
+        ],
+        check=False,
+        capture_output=True,
+    )
+    jobs = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
+    if jobs:
+        return jobs
+
+    cp = run_cmd(
+        [
+            "kubectl",
+            "get",
+            "rayjobs",
+            "-n",
+            TASK_NAMESPACE,
+            "-o",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
+        ],
+        check=False,
+        capture_output=True,
+    )
+    return [line.strip() for line in cp.stdout.splitlines() if execution_id in line]
+
+
+def diagnose_execution(execution_id: str) -> None:
+    start_port_forward()
+    init_flytectl()
+
+    print("=== EXECUTION ===")
+    run_cmd(
+        [
+            "flytectl",
+            "get",
+            "execution",
+            execution_id,
+            "-p",
+            REMOTE_PROJECT,
+            "-d",
+            REMOTE_DOMAIN,
+        ],
+        check=False,
+    )
+
+    print("=== EXECUTION DETAILS ===")
+    run_cmd(
+        [
+            "flytectl",
+            "get",
+            "execution",
+            execution_id,
+            "-p",
+            REMOTE_PROJECT,
+            "-d",
+            REMOTE_DOMAIN,
+            "--details",
+        ],
+        check=False,
+    )
+
+    pods = get_execution_pods(execution_id)
+    if pods:
+        print("=== MATCHING PODS ===")
+        run_cmd(["kubectl", "get", "pods", "-n", TASK_NAMESPACE, "-o", "wide"], check=False)
+        for pod in pods:
+            print(f"--- POD {pod} ---")
+            run_cmd(["kubectl", "describe", "pod", pod, "-n", TASK_NAMESPACE], check=False)
+            run_cmd(
+                ["kubectl", "logs", pod, "-n", TASK_NAMESPACE, "--all-containers=true", "--tail=120"],
+                check=False,
+            )
+    else:
+        print(f"No pod matched execution {execution_id}")
+
+    jobs = get_execution_rayjobs(execution_id)
+    if jobs:
+        print("=== MATCHING RAYJOBS ===")
+        run_cmd(["kubectl", "get", "rayjobs", "-n", TASK_NAMESPACE, "-o", "wide"], check=False)
+        for job in jobs:
+            print(f"--- RAYJOB {job} ---")
+            run_cmd(["kubectl", "describe", "rayjob", job, "-n", TASK_NAMESPACE], check=False)
+    else:
+        print(f"No RayJob matched execution {execution_id}")
+
+
+def delete_execution(execution_id: str) -> None:
+    start_port_forward()
+    init_flytectl()
+
+    log(f"Deleting execution {execution_id}")
+    run_cmd(
+        ["flytectl", "delete", "execution", execution_id, "-p", REMOTE_PROJECT, "-d", REMOTE_DOMAIN],
+        check=False,
+    )
+
+    run_cmd(
+        [
+            "kubectl",
+            "delete",
+            "rayjob",
+            "-n",
+            TASK_NAMESPACE,
+            "-l",
+            f"execution-id={execution_id}",
+            "--ignore-not-found=true",
+        ],
+        check=False,
+    )
+    run_cmd(
+        [
+            "kubectl",
+            "delete",
+            "pod",
+            "-n",
+            TASK_NAMESPACE,
+            "-l",
+            f"execution-id={execution_id}",
+            "--ignore-not-found=true",
+        ],
+        check=False,
+    )
+
+
 def cleanup_stale_resources() -> None:
     run_cmd(
         [
@@ -705,6 +873,11 @@ def cleanup_stale_resources() -> None:
     )
 
 
+def register_and_run() -> None:
+    registration_version = register_entities()
+    execute_launch_plan(version=registration_version)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -712,6 +885,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("register", help="Register train workflows and launch plans")
     sub.add_parser("train", help="Execute the train workflow")
     sub.add_parser("up", help="Register and then execute train")
+
+    diag = sub.add_parser("diagnose", help="Inspect a Flyte execution and related Kubernetes resources")
+    diag.add_argument("execution_id")
+
+    delete = sub.add_parser("delete", help="Delete a Flyte execution and matching Kubernetes resources")
+    delete.add_argument("execution_id")
+
     sub.add_parser("reset", help="Delete leftover train Ray / pod resources in the target namespace")
     return parser
 
@@ -724,7 +904,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     require_bin("python3")
 
     if args.command == "register":
-        require_aws_credentials_if_static()
         lint_sources()
         import_check()
         ensure_namespace_bootstrap_ready()
@@ -734,12 +913,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "train":
-        require_aws_credentials_if_static()
         execute_launch_plan()
         return 0
 
     if args.command == "up":
-        require_aws_credentials_if_static()
         lint_sources()
         import_check()
         ensure_namespace_bootstrap_ready()
@@ -748,16 +925,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         register_and_run()
         return 0
 
+    if args.command == "diagnose":
+        diagnose_execution(args.execution_id)
+        return 0
+
+    if args.command == "delete":
+        delete_execution(args.execution_id)
+        return 0
+
     if args.command == "reset":
         cleanup_stale_resources()
         return 0
 
     return 1
-
-
-def register_and_run() -> None:
-    registration_version = register_entities()
-    execute_launch_plan(version=registration_version)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-Bootstraps Flyte on Kubernetes and renders the Helm values file with PyYAML.
-
-Goals:
-- No YAML string stitching.
-- Correct chart structure.
-- Correct Python types: maps stay maps, lists stay lists.
-- Silent kubectl helpers: no manifest spam on stdout.
-- CNPG secret values decoded correctly.
-- Helm template validation before install.
-"""
-
 from __future__ import annotations
 
 import base64
@@ -45,8 +32,8 @@ FLYTE_DATACATALOG_DB = os.environ.get("FLYTE_DATACATALOG_DB", "datacatalog")
 FLYTE_OAUTH_CLIENT_ID = os.environ.get("FLYTE_OAUTH_CLIENT_ID", "flytepropeller")
 FLYTE_OAUTH_CLIENT_SECRET = os.environ.get("FLYTE_OAUTH_CLIENT_SECRET", "flytepropeller-secret")
 
-STORAGE_PROVIDER = os.environ.get("STORAGE_PROVIDER", "auto")
 USE_IAM = os.environ.get("USE_IAM", "false").lower() in {"1", "true", "yes", "y", "on"}
+FLYTE_STORAGE_TYPE = os.environ.get("FLYTE_STORAGE_TYPE", "s3").strip().lower()
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-south-1")
 S3_BUCKET = os.environ.get("S3_BUCKET", "e2e-mlops-data-681802563986")
@@ -56,17 +43,6 @@ AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "")
 AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN", "")
-
-GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
-GCP_BUCKET = os.environ.get("GCP_BUCKET", "mlops_iceberg_warehouse")
-GCP_SA_EMAIL = os.environ.get("GCP_SA_EMAIL", "")
-GCP_SERVICE_ACCOUNT_KEY = os.environ.get("GCP_SERVICE_ACCOUNT_KEY", "")
-
-AZURE_STORAGE_ACCOUNT = os.environ.get("AZURE_STORAGE_ACCOUNT", "")
-AZURE_CONTAINER = os.environ.get("AZURE_CONTAINER", "iceberg")
-AZURE_CLIENT_ID = os.environ.get("AZURE_CLIENT_ID", "")
-AZURE_TENANT_ID = os.environ.get("AZURE_TENANT_ID", "")
-FLYTE_STORAGE_CUSTOM_YAML = os.environ.get("FLYTE_STORAGE_CUSTOM_YAML", "")
 
 FLYTE_INGRESS_ENABLED = os.environ.get("FLYTE_INGRESS_ENABLED", "false")
 FLYTE_INGRESS_CLASS_NAME = os.environ.get("FLYTE_INGRESS_CLASS_NAME", "")
@@ -78,12 +54,12 @@ FLYTE_WORKFLOW_NOTIFICATIONS_ENABLED = os.environ.get("FLYTE_WORKFLOW_NOTIFICATI
 FLYTE_EXTERNAL_EVENTS_ENABLED = os.environ.get("FLYTE_EXTERNAL_EVENTS_ENABLED", "false")
 FLYTE_CLOUD_EVENTS_ENABLED = os.environ.get("FLYTE_CLOUD_EVENTS_ENABLED", "false")
 FLYTE_CONNECTOR_ENABLED = os.environ.get("FLYTE_CONNECTOR_ENABLED", "false")
-FLYTE_SPARK_OPERATOR_ENABLED = os.environ.get("FLYTE_SPARK_OPERATOR_ENABLED", "true")
+FLYTE_SPARK_OPERATOR_ENABLED = os.environ.get("FLYTE_SPARK_OPERATOR_ENABLED", "false")
 FLYTE_DASK_OPERATOR_ENABLED = os.environ.get("FLYTE_DASK_OPERATOR_ENABLED", "false")
 FLYTE_DATABRICKS_ENABLED = os.environ.get("FLYTE_DATABRICKS_ENABLED", "false")
 
-CHART_REPO_NAME = os.environ.get("CHART_REPO_NAME", "flyte")
-CHART_REPO_URL = os.environ.get("CHART_REPO_URL", "https://flyteorg.github.io/flyte")
+CHART_REPO_NAME = os.environ.get("CHART_REPO_NAME", "flyteorg")
+CHART_REPO_URL = os.environ.get("CHART_REPO_URL", "https://helm.flyte.org")
 CHART_NAME = os.environ.get("CHART_NAME", "flyte-core")
 CHART_VERSION = os.environ.get("CHART_VERSION", "1.16.4")
 RELEASE_NAME = os.environ.get("RELEASE_NAME", "flyte")
@@ -94,12 +70,11 @@ FLYTE_ATOMIC = os.environ.get("FLYTE_ATOMIC", "false").lower() in {"1", "true", 
 
 FLYTE_TASK_NAMESPACES = os.environ.get("FLYTE_TASK_NAMESPACES", "flytesnacks-development")
 TASK_AWS_SECRET_NAME = os.environ.get("TASK_AWS_SECRET_NAME", "flyte-aws-credentials")
-STORAGE_SECRET_NAME = os.environ.get("STORAGE_SECRET_NAME", "flyte-storage-config")
 
 APP_DB_USER = ""
 APP_DB_PASSWORD = ""
-SERVICE_ANNOTATION_KEY = ""
-SERVICE_ANNOTATION_VALUE = ""
+CONTROL_PLANE_AWS_ANNOTATION_KEY = ""
+CONTROL_PLANE_AWS_ANNOTATION_VALUE = ""
 
 
 def ts() -> str:
@@ -107,11 +82,11 @@ def ts() -> str:
 
 
 def log(msg: str) -> None:
-    print(f"[{ts()}] [flyte] {msg}", file=sys.stderr)
+    print(f"[{ts()}] [flyte] {msg}", file=sys.stderr, flush=True)
 
 
 def fatal(msg: str) -> None:
-    print(f"[{ts()}] [flyte][FATAL] {msg}", file=sys.stderr)
+    print(f"[{ts()}] [flyte][FATAL] {msg}", file=sys.stderr, flush=True)
     raise SystemExit(1)
 
 
@@ -123,40 +98,32 @@ def require_bin(name: str) -> None:
 
 
 def run(cmd: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    cp = subprocess.run(
         cmd,
         input=input_text,
         text=True,
         capture_output=True,
-        check=check,
+        check=False,
     )
+    if check and cp.returncode != 0:
+        detail: list[str] = []
+        if cp.stdout:
+            detail.append(f"stdout:\n{cp.stdout.rstrip()}")
+        if cp.stderr:
+            detail.append(f"stderr:\n{cp.stderr.rstrip()}")
+        suffix = f"\n{chr(10).join(detail)}" if detail else ""
+        raise RuntimeError(f"command failed ({cp.returncode}): {' '.join(cmd)}{suffix}")
+    return cp
 
 
 def run_text(cmd: list[str], *, input_text: str | None = None, check: bool = True) -> str:
-    res = subprocess.run(
-        cmd,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=check,
-    )
-    return res.stdout.strip()
+    return run(cmd, input_text=input_text, check=check).stdout.strip()
 
 
 def yaml_bool(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).lower() in {"1", "true", "yes", "y", "on"}
-
-
-def detect_storage_provider() -> str:
-    if STORAGE_PROVIDER in {"aws", "gcs", "azure"}:
-        return STORAGE_PROVIDER
-    if AZURE_STORAGE_ACCOUNT or AZURE_CLIENT_ID or AZURE_TENANT_ID:
-        return "azure"
-    if GCP_PROJECT or GCP_SA_EMAIL:
-        return "gcs"
-    return "aws"
 
 
 def split_namespaces(value: str) -> list[str]:
@@ -173,90 +140,45 @@ def apply_manifest(manifest: dict[str, Any]) -> None:
 
 
 def ensure_namespace(namespace: str) -> None:
-    manifest = {
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": namespace,
-            "labels": {
-                "app.kubernetes.io/part-of": "flyte",
+    apply_manifest(
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": namespace,
+                "labels": {"app.kubernetes.io/part-of": "flyte"},
             },
-        },
-    }
-    apply_manifest(manifest)
+        }
+    )
 
 
-def ensure_default_serviceaccount(namespace: str) -> None:
-    manifest = {
-        "apiVersion": "v1",
-        "kind": "ServiceAccount",
-        "metadata": {
-            "name": "default",
-            "namespace": namespace,
-        },
-    }
-    apply_manifest(manifest)
-
-
-def patch_default_serviceaccount_annotation(namespace: str, key: str, value: str) -> None:
-    if not key or not value:
-        return
-    ensure_default_serviceaccount(namespace)
-    run(
-        [
-            "kubectl",
-            "-n",
-            namespace,
-            "annotate",
-            "sa",
-            "default",
-            f"{key}={value}",
-            "--overwrite",
-        ],
-        check=True,
+def ensure_serviceaccount(namespace: str, name: str, annotations: dict[str, str] | None = None) -> None:
+    apply_manifest(
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "annotations": annotations or {},
+            },
+        }
     )
 
 
 def ensure_secret(namespace: str, name: str, string_data: dict[str, str]) -> None:
-    manifest = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": name,
-            "namespace": namespace,
-        },
-        "type": "Opaque",
-        "stringData": string_data,
-    }
-    apply_manifest(manifest)
-
-
-def find_app_secret_name() -> str:
-    selector = f"cnpg.io/cluster={CNPG_CLUSTER},cnpg.io/userType=app"
-    try:
-        name = run_text(
-            [
-                "kubectl",
-                "-n",
-                POSTGRES_NS,
-                "get",
-                "secret",
-                "-l",
-                selector,
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ]
-        )
-        if name:
-            return name
-    except subprocess.CalledProcessError:
-        pass
-
-    try:
-        run_text(["kubectl", "-n", POSTGRES_NS, "get", "secret", f"{CNPG_CLUSTER}-app"])
-        return f"{CNPG_CLUSTER}-app"
-    except subprocess.CalledProcessError:
-        return ""
+    apply_manifest(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+            },
+            "type": "Opaque",
+            "stringData": string_data,
+        }
+    )
 
 
 def secret_value(namespace: str, secret_name: str, key: str) -> str:
@@ -281,6 +203,35 @@ def secret_value(namespace: str, secret_name: str, key: str) -> str:
     try:
         return base64.b64decode(raw).decode("utf-8")
     except Exception:
+        return ""
+
+
+def find_app_secret_name() -> str:
+    selector = f"cnpg.io/cluster={CNPG_CLUSTER},cnpg.io/userType=app"
+    try:
+        name = run_text(
+            [
+                "kubectl",
+                "-n",
+                POSTGRES_NS,
+                "get",
+                "secret",
+                "-l",
+                selector,
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ]
+        )
+        if name:
+            return name
+    except subprocess.CalledProcessError:
+        pass
+
+    fallback = f"{CNPG_CLUSTER}-app"
+    try:
+        run_text(["kubectl", "-n", POSTGRES_NS, "get", "secret", fallback])
+        return fallback
+    except subprocess.CalledProcessError:
         return ""
 
 
@@ -338,7 +289,7 @@ def ensure_database(db_name: str) -> None:
     ).strip()
 
     if exists != "1":
-        log(f"creating database {db_name} if not exist")
+        log(f"creating database {db_name}")
         run(
             [
                 "kubectl",
@@ -393,54 +344,77 @@ def join_uri_prefix(scheme: str, bucket_or_container: str, prefix: str = "") -> 
     return f"{scheme}://{bucket_or_container}/"
 
 
-def identity_annotation(provider: str) -> tuple[str, str]:
-    if provider == "aws" and USE_IAM:
+def validate_static_aws_credentials() -> None:
+    if FLYTE_STORAGE_TYPE != "s3" or USE_IAM:
+        return
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        fatal("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required when FLYTE_STORAGE_TYPE=s3 and USE_IAM=false")
+
+
+def aws_secret_data() -> dict[str, str]:
+    data = {
+        "AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
+        "AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
+        "AWS_DEFAULT_REGION": AWS_REGION,
+        "AWS_REGION": AWS_REGION,
+        "FLYTE_AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
+        "FLYTE_AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
+        "FLYTE_AWS_DEFAULT_REGION": AWS_REGION,
+        "FLYTE_AWS_REGION": AWS_REGION,
+    }
+    if AWS_SESSION_TOKEN:
+        data["AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
+        data["FLYTE_AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
+    return data
+
+
+def ensure_accesskey_secret(namespace: str) -> None:
+    ensure_namespace(namespace)
+    ensure_secret(namespace, TASK_AWS_SECRET_NAME, aws_secret_data())
+
+
+def ensure_task_namespace_auth(namespace: str) -> None:
+    ensure_namespace(namespace)
+    if USE_IAM:
         if not AWS_ROLE_ARN:
             fatal("AWS_ROLE_ARN is required when USE_IAM=true")
-        return "eks.amazonaws.com/role-arn", AWS_ROLE_ARN
-    if provider == "gcs" and GCP_SA_EMAIL:
-        return "iam.gke.io/gcp-service-account", GCP_SA_EMAIL
-    if provider == "azure" and AZURE_CLIENT_ID:
-        return "azure.workload.identity/client-id", AZURE_CLIENT_ID
-    return "", ""
+        ensure_serviceaccount(namespace, "ray", {"eks.amazonaws.com/role-arn": AWS_ROLE_ARN})
+    elif FLYTE_STORAGE_TYPE == "s3":
+        ensure_accesskey_secret(namespace)
+        ensure_serviceaccount(namespace, "ray")
+    else:
+        ensure_serviceaccount(namespace, "ray")
 
 
-def build_storage_block(provider: str) -> dict[str, Any]:
-    if provider == "aws":
-        auth_type = "iam" if USE_IAM else "accesskey"
+def ensure_control_plane_secret() -> None:
+    if FLYTE_STORAGE_TYPE == "s3" and not USE_IAM:
+        ensure_accesskey_secret(TARGET_NS)
+
+
+def control_plane_serviceaccount_block() -> dict[str, Any]:
+    block = {"create": True, "annotations": {}}
+    if FLYTE_STORAGE_TYPE == "s3" and USE_IAM:
+        if not AWS_ROLE_ARN:
+            fatal("AWS_ROLE_ARN is required when USE_IAM=true")
+        block["annotations"] = {"eks.amazonaws.com/role-arn": AWS_ROLE_ARN}
+    return block
+
+
+def build_storage_block() -> dict[str, Any]:
+    if FLYTE_STORAGE_TYPE not in {"sandbox", "s3"}:
+        fatal(f"unsupported FLYTE_STORAGE_TYPE={FLYTE_STORAGE_TYPE!r}; use sandbox or s3")
+
+    if FLYTE_STORAGE_TYPE == "sandbox":
         return {
             "secretName": "",
-            "type": "s3",
+            "type": "sandbox",
             "bucketName": S3_BUCKET,
             "s3": {
-                "endpoint": S3_ENDPOINT,
-                "region": AWS_REGION,
-                "authType": auth_type,
-                "accessKey": AWS_ACCESS_KEY_ID if not USE_IAM else "",
-                "secretKey": AWS_SECRET_ACCESS_KEY if not USE_IAM else "",
-            },
-            "gcs": {"projectId": ""},
-            "custom": {},
-            "enableMultiContainer": False,
-            "limits": {"maxDownloadMBs": 10},
-            "cache": {"maxSizeMBs": 0, "targetGCPercent": 70},
-        }
-
-    if provider == "gcs":
-        return {
-            "secretName": "",
-            "type": "gcs",
-            "bucketName": GCP_BUCKET,
-            "s3": {
                 "endpoint": "",
                 "region": AWS_REGION,
                 "authType": "iam",
                 "accessKey": "",
                 "secretKey": "",
-            },
-            "gcs": {
-                "projectId": GCP_PROJECT,
-                "serviceAccountKey": GCP_SERVICE_ACCOUNT_KEY,
             },
             "custom": {},
             "enableMultiContainer": False,
@@ -448,112 +422,67 @@ def build_storage_block(provider: str) -> dict[str, Any]:
             "cache": {"maxSizeMBs": 0, "targetGCPercent": 70},
         }
 
-    if provider == "azure":
-        if not FLYTE_STORAGE_CUSTOM_YAML:
-            fatal("FLYTE_STORAGE_CUSTOM_YAML is required for azure")
-        try:
-            custom = yaml.safe_load(FLYTE_STORAGE_CUSTOM_YAML)
-        except yaml.YAMLError as exc:
-            fatal(f"FLYTE_STORAGE_CUSTOM_YAML is invalid YAML: {exc}")
-        if custom is None:
-            custom = {}
-        if not isinstance(custom, dict):
-            fatal("FLYTE_STORAGE_CUSTOM_YAML must parse to a mapping/object")
-        return {
-            "secretName": "",
-            "type": "custom",
-            "bucketName": AZURE_CONTAINER,
-            "s3": {
-                "endpoint": "",
-                "region": AWS_REGION,
-                "authType": "iam",
-                "accessKey": "",
-                "secretKey": "",
-            },
-            "gcs": {"projectId": ""},
-            "custom": custom,
-            "enableMultiContainer": False,
-            "limits": {"maxDownloadMBs": 10},
-            "cache": {"maxSizeMBs": 0, "targetGCPercent": 70},
-        }
-
-    fatal(f"unsupported storage provider {provider}")
-    raise AssertionError("unreachable")
-
-
-def build_k8s_block(provider: str) -> dict[str, Any]:
-    default_env_vars: dict[str, str] = {}
-    default_env_from_secrets: list[str] = []
-
-    if provider == "aws" and not USE_IAM:
-        default_env_from_secrets = [TASK_AWS_SECRET_NAME]
-        default_env_vars = {
-            "AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
-            "AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
-            "AWS_DEFAULT_REGION": AWS_REGION,
-            "AWS_REGION": AWS_REGION,
-            "FLYTE_AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
-            "FLYTE_AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
-        }
-        if AWS_SESSION_TOKEN:
-            default_env_vars["AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
-        if S3_ENDPOINT:
-            default_env_vars["FLYTE_AWS_ENDPOINT"] = S3_ENDPOINT
-
+    auth_type = "iam" if USE_IAM else "accesskey"
     return {
-        "plugins": {
-            "k8s": {
-                "default-cpus": "100m",
-                "default-memory": "200Mi",
-                "default-env-from-configmaps": [],
-                "default-env-from-secrets": default_env_from_secrets,
-                "default-env-vars": default_env_vars,
-            }
-        }
+        "secretName": "",
+        "type": "s3",
+        "bucketName": S3_BUCKET,
+        "s3": {
+            "endpoint": S3_ENDPOINT,
+            "region": AWS_REGION,
+            "authType": auth_type,
+            "accessKey": AWS_ACCESS_KEY_ID if auth_type == "accesskey" else "",
+            "secretKey": AWS_SECRET_ACCESS_KEY if auth_type == "accesskey" else "",
+        },
+        "custom": {},
+        "enableMultiContainer": False,
+        "limits": {"maxDownloadMBs": 10},
+        "cache": {"maxSizeMBs": 0, "targetGCPercent": 70},
     }
 
 
 def build_values() -> dict[str, Any]:
-    provider = detect_storage_provider()
-    global SERVICE_ANNOTATION_KEY, SERVICE_ANNOTATION_VALUE
-    SERVICE_ANNOTATION_KEY, SERVICE_ANNOTATION_VALUE = identity_annotation(provider)
+    storage_type = FLYTE_STORAGE_TYPE
+    raw_prefix = os.environ.get("FLYTE_RAWOUTPUT_PREFIX", join_uri_prefix("s3", S3_BUCKET, S3_PREFIX))
+    service_account = control_plane_serviceaccount_block()
 
-    service_account = {
-        "create": True,
-        "annotations": {SERVICE_ANNOTATION_KEY: SERVICE_ANNOTATION_VALUE}
-        if SERVICE_ANNOTATION_KEY and SERVICE_ANNOTATION_VALUE
-        else {},
-    }
-
-    if provider == "aws":
-        raw_prefix = os.environ.get("FLYTE_RAWOUTPUT_PREFIX", join_uri_prefix("s3", S3_BUCKET, S3_PREFIX))
-        remote_scheme = "s3"
-    elif provider == "gcs":
-        raw_prefix = os.environ.get("FLYTE_RAWOUTPUT_PREFIX", join_uri_prefix("gs", GCP_BUCKET))
-        remote_scheme = "gs"
-    else:
-        raw_prefix = os.environ.get(
-            "FLYTE_RAWOUTPUT_PREFIX",
-            join_uri_prefix("abfs", f"{AZURE_CONTAINER}@{AZURE_STORAGE_ACCOUNT}.dfs.core.windows.net"),
-        )
-        remote_scheme = "abfs"
+    task_secret_names = [TASK_AWS_SECRET_NAME] if storage_type == "s3" and not USE_IAM else []
 
     values: dict[str, Any] = {
         "deployRedoc": False,
         "flyteadmin": {
             "enabled": True,
             "replicaCount": 1,
+            "image": {
+                "repository": "cr.flyte.org/flyteorg/flyteadmin-release",
+                "tag": "v1.16.4",
+                "pullPolicy": "IfNotPresent",
+            },
+            "env": [],
             "serviceAccount": copy.deepcopy(service_account),
             "service": {"type": "ClusterIP"},
+            "initialProjects": ["flytesnacks", "flytetester", "flyteexamples"],
         },
         "flytescheduler": {
             "runPrecheck": True,
+            "image": {
+                "repository": "cr.flyte.org/flyteorg/flytescheduler-release",
+                "tag": "v1.16.4",
+                "pullPolicy": "IfNotPresent",
+            },
+            "podEnv": {},
             "serviceAccount": copy.deepcopy(service_account),
             "service": {"enabled": False},
         },
         "datacatalog": {
             "enabled": True,
             "replicaCount": 1,
+            "image": {
+                "repository": "cr.flyte.org/flyteorg/datacatalog-release",
+                "tag": "v1.16.4",
+                "pullPolicy": "IfNotPresent",
+            },
+            "podEnv": {},
             "serviceAccount": copy.deepcopy(service_account),
             "service": {"type": "ClusterIP"},
         },
@@ -563,31 +492,35 @@ def build_values() -> dict[str, Any]:
             "manager": False,
             "createCRDs": True,
             "replicaCount": 1,
+            "image": {
+                "repository": "cr.flyte.org/flyteorg/flytepropeller-release",
+                "tag": "v1.16.4",
+                "pullPolicy": "IfNotPresent",
+            },
+            "podEnv": {},
             "serviceAccount": copy.deepcopy(service_account),
             "service": {"enabled": False},
         },
         "flyteconsole": {
             "enabled": True,
             "replicaCount": 1,
-            "serviceAccount": {
-                "create": True,
-                "annotations": {},
+            "image": {
+                "repository": "cr.flyte.org/flyteorg/flyteconsole-release",
+                "tag": "v1.16.4",
+                "pullPolicy": "IfNotPresent",
             },
+            "podEnv": {},
+            "serviceAccount": {"create": True, "annotations": {}},
             "service": {"type": "ClusterIP"},
         },
         "webhook": {
             "enabled": True,
-            "serviceAccount": {
-                "create": True,
-                "annotations": {},
-            },
+            "serviceAccount": {"create": True, "annotations": {}},
             "service": {"type": "ClusterIP"},
+            "podEnv": {},
         },
         "common": {
-            "databaseSecret": {
-                "name": DB_SECRET_NAME,
-                "secretManifest": {},
-            },
+            "databaseSecret": {"name": DB_SECRET_NAME, "secretManifest": {}},
             "ingress": {
                 "ingressClassName": FLYTE_INGRESS_CLASS_NAME,
                 "enabled": yaml_bool(FLYTE_INGRESS_ENABLED),
@@ -600,7 +533,7 @@ def build_values() -> dict[str, Any]:
             },
             "flyteNamespaceTemplate": {"enabled": False},
         },
-        "storage": build_storage_block(provider),
+        "storage": build_storage_block(),
         "db": {
             "datacatalog": {
                 "database": {
@@ -630,7 +563,80 @@ def build_values() -> dict[str, Any]:
             }
         },
         "configmap": {
+            "adminServer": {
+                "server": {
+                    "httpPort": 8088,
+                    "grpc": {"port": 8089},
+                    "security": {
+                        "secure": False,
+                        "useAuth": False,
+                        "allowCors": True,
+                        "allowedOrigins": ["*"],
+                        "allowedHeaders": ["Content-Type", "flyte-authorization"],
+                    },
+                },
+                "flyteadmin": {
+                    "roleNameKey": "iam.amazonaws.com/role",
+                    "profilerPort": 10254,
+                    "metricsScope": "flyte:",
+                    "metadataStoragePrefix": ["metadata", "admin"],
+                    "eventVersion": 2,
+                    "injectIdentityAnnotations": False,
+                    "identityAnnotationPrefix": "flyte.org",
+                    "identityAnnotationKeys": ["email", "sub"],
+                    "testing": {"host": "http://flyteadmin"},
+                },
+                "auth": {
+                    "authorizedUris": [
+                        "https://localhost:30081",
+                        "http://flyteadmin:80",
+                        "http://flyteadmin.flyte.svc.cluster.local:80",
+                    ]
+                },
+            },
+            "datacatalogServer": {
+                "datacatalog": {
+                    "storage-prefix": "metadata/datacatalog",
+                    "metrics-scope": "flyte",
+                    "profiler-port": 10254,
+                    "heartbeat-grace-period-multiplier": 3,
+                    "max-reservation-heartbeat": "30s",
+                },
+                "application": {
+                    "grpcPort": 8089,
+                    "httpPort": 8080,
+                    "grpcServerReflection": True,
+                    "grpcMaxRecvMsgSizeMBs": 6,
+                },
+            },
+            "task_resource_defaults": {
+                "task_resources": {
+                    "defaults": {"cpu": "100m", "memory": "500Mi"},
+                    "limits": {"cpu": "2", "memory": "1Gi", "gpu": 1},
+                }
+            },
+            "admin": {
+                "event": {"type": "admin", "rate": 500, "capacity": 1000},
+                "admin": {
+                    "endpoint": "flyteadmin:81",
+                    "insecure": True,
+                    "clientId": "{{ .Values.secrets.adminOauthClientCredentials.clientId }}",
+                    "clientSecretLocation": "/etc/secrets/client_secret",
+                },
+            },
+            "catalog": {
+                "catalog-cache": {
+                    "endpoint": "datacatalog:89",
+                    "type": "datacatalog",
+                    "insecure": True,
+                }
+            },
             "core": {
+                "manager": {
+                    "pod-application": "flytepropeller",
+                    "pod-template-container-name": "flytepropeller",
+                    "pod-template-name": "flytepropeller-template",
+                },
                 "propeller": {
                     "rawoutput-prefix": raw_prefix,
                     "metadata-prefix": "metadata/propeller",
@@ -639,16 +645,20 @@ def build_values() -> dict[str, Any]:
                     "workflow-reeval-duration": "30s",
                     "downstream-eval-duration": "30s",
                     "limit-namespace": "all",
+                    "prof-port": 10254,
+                    "metrics-prefix": "flyte",
+                    "enable-admin-launcher": True,
                     "leader-election": {
+                        "lock-config-map": {"name": "propeller-leader", "namespace": TARGET_NS},
                         "enabled": True,
-                        "lock-config-map": {
-                            "name": "propeller-leader",
-                            "namespace": TARGET_NS,
-                        },
                         "lease-duration": "15s",
                         "renew-deadline": "10s",
                         "retry-period": "2s",
                     },
+                },
+                "webhook": {
+                    "certDir": "/etc/webhook/certs",
+                    "serviceName": "flyte-pod-webhook",
                 },
             },
             "enabled_plugins": {
@@ -660,22 +670,33 @@ def build_values() -> dict[str, Any]:
                             "k8s-array",
                             "connector-service",
                             "echo",
-                            "spark",
                         ],
                         "default-for-task-types": {
                             "container": "container",
                             "sidecar": "sidecar",
                             "container_array": "k8s-array",
-                            "spark": "spark",
                         },
                     }
                 }
             },
-            "k8s": build_k8s_block(provider),
+            "k8s": {
+                "plugins": {
+                    "k8s": {
+                        "default-env-from-configmaps": [],
+                        "default-env-from-secrets": task_secret_names,
+                        "default-env-vars": {
+                            "AWS_DEFAULT_REGION": AWS_REGION,
+                            "AWS_REGION": AWS_REGION,
+                        },
+                        "default-cpus": "100m",
+                        "default-memory": "200Mi",
+                    }
+                }
+            },
             "remoteData": {
                 "remoteData": {
                     "region": AWS_REGION,
-                    "scheme": remote_scheme,
+                    "scheme": "s3" if storage_type == "s3" else "local",
                     "signedUrls": {"durationMinutes": 3},
                 }
             },
@@ -694,41 +715,10 @@ def build_values() -> dict[str, Any]:
         "external_events": {"enable": yaml_bool(FLYTE_EXTERNAL_EVENTS_ENABLED)},
         "cloud_events": {"enable": yaml_bool(FLYTE_CLOUD_EVENTS_ENABLED)},
         "cluster_resource_manager": {"enabled": yaml_bool(FLYTE_CLUSTER_RESOURCE_MANAGER_ENABLED)},
-        "sparkoperator": {
-            "enabled": yaml_bool(FLYTE_SPARK_OPERATOR_ENABLED),
-            "plugin_config": {
-                "plugins": {
-                    "spark": {
-                        "spark-config-default": (
-                            [
-                                {
-                                    "spark.hadoop.fs.s3a.aws.credentials.provider": "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
-                                },
-                                {"spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version": "2"},
-                                {"spark.kubernetes.allocation.batch.size": "50"},
-                                {"spark.hadoop.fs.s3a.acl.default": "BucketOwnerFullControl"},
-                                {"spark.hadoop.fs.s3n.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"},
-                                {"spark.hadoop.fs.AbstractFileSystem.s3n.impl": "org.apache.hadoop.fs.s3a.S3A"},
-                                {"spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"},
-                                {"spark.hadoop.fs.AbstractFileSystem.s3.impl": "org.apache.hadoop.fs.s3a.S3A"},
-                                {"spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem"},
-                                {"spark.hadoop.fs.AbstractFileSystem.s3a.impl": "org.apache.hadoop.fs.s3a.S3A"},
-                                {"spark.hadoop.fs.s3a.multipart.threshold": "536870912"},
-                                {"spark.blacklist.enabled": "true"},
-                                {"spark.blacklist.timeout": "5m"},
-                                {"spark.task.maxfailures": "8"},
-                            ]
-                            if provider == "aws"
-                            else []
-                        )
-                    }
-                }
-            },
-        },
+        "sparkoperator": {"enabled": yaml_bool(FLYTE_SPARK_OPERATOR_ENABLED)},
         "daskoperator": {"enabled": yaml_bool(FLYTE_DASK_OPERATOR_ENABLED)},
         "databricks": {"enabled": yaml_bool(FLYTE_DATABRICKS_ENABLED)},
     }
-
     return values
 
 
@@ -753,8 +743,7 @@ def validate_rendered_values() -> None:
             TARGET_NS,
             "-f",
             str(VALUES_FILE),
-        ],
-        check=True,
+        ]
     )
 
 
@@ -762,33 +751,16 @@ def require_prereqs() -> None:
     require_bin("kubectl")
     require_bin("helm")
     require_bin("python3")
-    run(["kubectl", "cluster-info"], check=True)
+    run(["kubectl", "cluster-info"])
 
 
 def ensure_release_namespace() -> None:
     ensure_namespace(TARGET_NS)
 
 
-def ensure_task_aws_secret(namespace: str) -> None:
-    if USE_IAM:
-        return
-    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-        fatal("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required when USE_IAM=false")
-
-    ensure_namespace(namespace)
-    data = {
-        "AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
-        "AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
-        "AWS_DEFAULT_REGION": AWS_REGION,
-        "AWS_REGION": AWS_REGION,
-        "FLYTE_AWS_ACCESS_KEY_ID": AWS_ACCESS_KEY_ID,
-        "FLYTE_AWS_SECRET_ACCESS_KEY": AWS_SECRET_ACCESS_KEY,
-    }
-    if AWS_SESSION_TOKEN:
-        data["AWS_SESSION_TOKEN"] = AWS_SESSION_TOKEN
-    if S3_ENDPOINT:
-        data["FLYTE_AWS_ENDPOINT"] = S3_ENDPOINT
-    ensure_secret(namespace, TASK_AWS_SECRET_NAME, data)
+def ensure_task_namespaces_ready() -> None:
+    for namespace in split_namespaces(FLYTE_TASK_NAMESPACES):
+        ensure_task_namespace_auth(namespace)
 
 
 def print_summary() -> None:
@@ -837,16 +809,25 @@ def wait_for_rollouts() -> None:
     for dep in [line.strip() for line in deploys.splitlines() if line.strip()]:
         log(f"waiting for deployment {dep}")
         run(
-            ["kubectl", "-n", TARGET_NS, "rollout", "status", f"deployment/{dep}", f"--timeout={ROLLOUT_TIMEOUT}"],
-            check=True,
+            [
+                "kubectl",
+                "-n",
+                TARGET_NS,
+                "rollout",
+                "status",
+                f"deployment/{dep}",
+                f"--timeout={ROLLOUT_TIMEOUT}",
+            ]
         )
 
 
 def main() -> None:
     global APP_DB_USER, APP_DB_PASSWORD, DB_HOST, POOLER_PORT
+    global CONTROL_PLANE_AWS_ANNOTATION_KEY, CONTROL_PLANE_AWS_ANNOTATION_VALUE
 
     require_prereqs()
     ensure_release_namespace()
+    validate_static_aws_credentials()
 
     app_secret = find_app_secret_name()
     if not app_secret:
@@ -871,55 +852,27 @@ def main() -> None:
 
     resolve_db_host()
 
-    provider = detect_storage_provider()
-
-    if provider == "aws":
-        if USE_IAM:
-            if not AWS_ROLE_ARN:
-                fatal("AWS_ROLE_ARN is required when USE_IAM=true")
-            global SERVICE_ANNOTATION_KEY, SERVICE_ANNOTATION_VALUE
-            SERVICE_ANNOTATION_KEY, SERVICE_ANNOTATION_VALUE = "eks.amazonaws.com/role-arn", AWS_ROLE_ARN
-        else:
-            if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-                fatal("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required when USE_IAM=false")
-            SERVICE_ANNOTATION_KEY = ""
-            SERVICE_ANNOTATION_VALUE = ""
-    elif provider == "gcs":
-        if not GCP_PROJECT:
-            fatal("GCP_PROJECT is required for gcs")
-        if GCP_SA_EMAIL:
-            SERVICE_ANNOTATION_KEY, SERVICE_ANNOTATION_VALUE = "iam.gke.io/gcp-service-account", GCP_SA_EMAIL
-        else:
-            SERVICE_ANNOTATION_KEY = ""
-            SERVICE_ANNOTATION_VALUE = ""
-    elif provider == "azure":
-        if not AZURE_STORAGE_ACCOUNT:
-            fatal("AZURE_STORAGE_ACCOUNT is required for azure")
-        if not FLYTE_STORAGE_CUSTOM_YAML:
-            fatal("FLYTE_STORAGE_CUSTOM_YAML is required for azure")
-        if AZURE_CLIENT_ID:
-            SERVICE_ANNOTATION_KEY, SERVICE_ANNOTATION_VALUE = "azure.workload.identity/client-id", AZURE_CLIENT_ID
-        else:
-            SERVICE_ANNOTATION_KEY = ""
-            SERVICE_ANNOTATION_VALUE = ""
+    if FLYTE_STORAGE_TYPE == "s3" and USE_IAM:
+        if not AWS_ROLE_ARN:
+            fatal("AWS_ROLE_ARN is required when USE_IAM=true")
+        CONTROL_PLANE_AWS_ANNOTATION_KEY = "eks.amazonaws.com/role-arn"
+        CONTROL_PLANE_AWS_ANNOTATION_VALUE = AWS_ROLE_ARN
     else:
-        fatal(f"unsupported storage provider {provider}")
+        CONTROL_PLANE_AWS_ANNOTATION_KEY = ""
+        CONTROL_PLANE_AWS_ANNOTATION_VALUE = ""
 
     ensure_database(FLYTE_ADMIN_DB)
     ensure_database(FLYTE_DATACATALOG_DB)
 
     ensure_secret(TARGET_NS, DB_SECRET_NAME, {"pass.txt": APP_DB_PASSWORD})
-    for namespace in split_namespaces(FLYTE_TASK_NAMESPACES):
-        ensure_namespace(namespace)
-        if provider == "aws" and USE_IAM and AWS_ROLE_ARN:
-            patch_default_serviceaccount_annotation(namespace, "eks.amazonaws.com/role-arn", AWS_ROLE_ARN)
-        elif provider == "gcs" and GCP_SA_EMAIL:
-            patch_default_serviceaccount_annotation(namespace, "iam.gke.io/gcp-service-account", GCP_SA_EMAIL)
-        elif provider == "azure" and AZURE_CLIENT_ID:
-            patch_default_serviceaccount_annotation(namespace, "azure.workload.identity/client-id", AZURE_CLIENT_ID)
+
+    if FLYTE_STORAGE_TYPE == "s3" and not USE_IAM:
+        ensure_control_plane_secret()
+
+    ensure_task_namespaces_ready()
 
     run(["helm", "repo", "add", CHART_REPO_NAME, CHART_REPO_URL], check=False)
-    run(["helm", "repo", "update"], check=True)
+    run(["helm", "repo", "update"])
 
     values = build_values()
     render_values_file(values)
@@ -944,7 +897,7 @@ def main() -> None:
     if FLYTE_ATOMIC:
         helm_args.append("--atomic")
 
-    run(helm_args, check=True)
+    run(helm_args)
     wait_for_rollouts()
     print_summary()
 
@@ -953,9 +906,10 @@ def delete_all() -> None:
     run(["kubectl", "-n", TARGET_NS, "delete", "deployment", RELEASE_NAME, "--ignore-not-found"], check=False)
     run(["kubectl", "-n", TARGET_NS, "delete", "secret", DB_SECRET_NAME, "--ignore-not-found"], check=False)
     run(["kubectl", "-n", TARGET_NS, "delete", "secret", AUTH_SECRET_NAME, "--ignore-not-found"], check=False)
-    run(["kubectl", "-n", TARGET_NS, "delete", "secret", STORAGE_SECRET_NAME, "--ignore-not-found"], check=False)
+    run(["kubectl", "-n", TARGET_NS, "delete", "secret", TASK_AWS_SECRET_NAME, "--ignore-not-found"], check=False)
     for namespace in split_namespaces(FLYTE_TASK_NAMESPACES):
         run(["kubectl", "-n", namespace, "delete", "secret", TASK_AWS_SECRET_NAME, "--ignore-not-found"], check=False)
+        run(["kubectl", "-n", namespace, "delete", "serviceaccount", "ray", "--ignore-not-found"], check=False)
     run(["helm", "uninstall", RELEASE_NAME, "-n", TARGET_NS], check=False)
     log("deleted Flyte release and secrets")
 
@@ -974,18 +928,22 @@ def cli() -> int:
                 "Usage: flyte_setup.py [--rollout|--delete]\n\n"
                 "Environment variables:\n"
                 "  DB_ACCESS_MODE=rw|pooler\n"
-                "  STORAGE_PROVIDER=auto|aws|gcs|azure\n"
                 "  USE_IAM=true|false\n"
+                "  FLYTE_STORAGE_TYPE=sandbox|s3\n"
+                "  AWS_REGION=ap-south-1\n"
+                "  AWS_ACCESS_KEY_ID=...\n"
+                "  AWS_SECRET_ACCESS_KEY=...\n"
+                "  AWS_SESSION_TOKEN=...\n"
+                "  AWS_ROLE_ARN=...\n"
                 "  FLYTE_TASK_NAMESPACES=flytesnacks-development[,other-namespace]\n"
                 "  TASK_AWS_SECRET_NAME=flyte-aws-credentials\n"
-                "  STORAGE_SECRET_NAME=flyte-storage-config\n"
                 "  FLYTE_SPARK_OPERATOR_ENABLED=true|false\n"
                 "  FLYTE_ATOMIC=true|false\n"
             )
             return 0
         fatal(f"unknown option: {sys.argv[1]}")
     except subprocess.CalledProcessError as exc:
-        print(f"[{ts()}] [flyte][FATAL] command failed: {exc.cmd}", file=sys.stderr)
+        print(f"[{ts()}] [flyte][FATAL] command failed: {exc.cmd}", file=sys.stderr, flush=True)
         try:
             dump_diagnostics()
         except Exception:
@@ -994,7 +952,7 @@ def cli() -> int:
     except SystemExit:
         raise
     except Exception as exc:
-        print(f"[{ts()}] [flyte][FATAL] {exc}", file=sys.stderr)
+        print(f"[{ts()}] [flyte][FATAL] {exc}", file=sys.stderr, flush=True)
         try:
             dump_diagnostics()
         except Exception:
