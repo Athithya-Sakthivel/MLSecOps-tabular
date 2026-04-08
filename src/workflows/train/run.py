@@ -80,18 +80,19 @@ PYFLYTE_REGISTER_EXTRA_ARGS = _env_str("PYFLYTE_REGISTER_EXTRA_ARGS", "")
 
 RESOURCE_QUOTA_NAME = _env_str("TRAIN_RESOURCE_QUOTA_NAME", "ray-workload-quota")
 
+# Namespace quota is set to 4Gi RAM to match the intended train profile.
 RESOURCE_QUOTA_KIND_REQUESTS_CPU = _env_str("TRAIN_RESOURCE_QUOTA_KIND_REQUESTS_CPU", "8")
-RESOURCE_QUOTA_KIND_REQUESTS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_KIND_REQUESTS_MEMORY", "16Gi")
+RESOURCE_QUOTA_KIND_REQUESTS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_KIND_REQUESTS_MEMORY", "4Gi")
 RESOURCE_QUOTA_KIND_LIMITS_CPU = _env_str("TRAIN_RESOURCE_QUOTA_KIND_LIMITS_CPU", "16")
-RESOURCE_QUOTA_KIND_LIMITS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_KIND_LIMITS_MEMORY", "24Gi")
+RESOURCE_QUOTA_KIND_LIMITS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_KIND_LIMITS_MEMORY", "4Gi")
 RESOURCE_QUOTA_KIND_PODS = _env_str("TRAIN_RESOURCE_QUOTA_KIND_PODS", "60")
 RESOURCE_QUOTA_KIND_PVC = _env_str("TRAIN_RESOURCE_QUOTA_KIND_PVC", "40")
 RESOURCE_QUOTA_KIND_SERVICES = _env_str("TRAIN_RESOURCE_QUOTA_KIND_SERVICES", "50")
 
 RESOURCE_QUOTA_EKS_REQUESTS_CPU = _env_str("TRAIN_RESOURCE_QUOTA_EKS_REQUESTS_CPU", "24")
-RESOURCE_QUOTA_EKS_REQUESTS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_EKS_REQUESTS_MEMORY", "48Gi")
+RESOURCE_QUOTA_EKS_REQUESTS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_EKS_REQUESTS_MEMORY", "4Gi")
 RESOURCE_QUOTA_EKS_LIMITS_CPU = _env_str("TRAIN_RESOURCE_QUOTA_EKS_LIMITS_CPU", "48")
-RESOURCE_QUOTA_EKS_LIMITS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_EKS_LIMITS_MEMORY", "96Gi")
+RESOURCE_QUOTA_EKS_LIMITS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_EKS_LIMITS_MEMORY", "4Gi")
 RESOURCE_QUOTA_EKS_PODS = _env_str("TRAIN_RESOURCE_QUOTA_EKS_PODS", "150")
 RESOURCE_QUOTA_EKS_PVC = _env_str("TRAIN_RESOURCE_QUOTA_EKS_PVC", "80")
 RESOURCE_QUOTA_EKS_SERVICES = _env_str("TRAIN_RESOURCE_QUOTA_EKS_SERVICES", "150")
@@ -140,6 +141,14 @@ def run_cmd(
     return cp
 
 
+def port_is_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def stop_port_forward_if_any() -> None:
     global PORT_FORWARD_PROC
 
@@ -177,14 +186,6 @@ def cleanup() -> None:
 
 
 atexit.register(cleanup)
-
-
-def port_is_open(host: str, port: int) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except OSError:
-        return False
 
 
 def start_port_forward() -> None:
@@ -231,7 +232,8 @@ def start_port_forward() -> None:
     PORT_FORWARD_PROC = proc
     PORT_FORWARD_PID_FILE.write_text(str(proc.pid))
 
-    for _ in range(60):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
         if port_is_open(FLYTE_ADMIN_HOST, FLYTE_ADMIN_PORT):
             return
         if proc.poll() is not None:
@@ -241,8 +243,11 @@ def start_port_forward() -> None:
     tail = ""
     if PORT_FORWARD_LOG.is_file():
         try:
-            tail_lines = PORT_FORWARD_LOG.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
-            tail = "\n".join(tail_lines)
+            tail = "\n".join(
+                PORT_FORWARD_LOG.read_text(encoding="utf-8", errors="replace")
+                .strip()
+                .splitlines()[-20:]
+            )
         except Exception:
             tail = ""
 
@@ -266,6 +271,12 @@ def init_flytectl() -> None:
         ],
         capture_output=True,
     )
+
+
+def prepare_flyte_runtime() -> None:
+    ensure_namespace_bootstrap_ready()
+    start_port_forward()
+    init_flytectl()
 
 
 def lint_sources() -> None:
@@ -524,6 +535,12 @@ def pyflyte_register_supports_copy_or_fast_flag() -> tuple[bool, bool]:
     return ("--copy" in combined, "--fast" in combined)
 
 
+def pyflyte_register_supports_service_account() -> bool:
+    help_text = run_cmd(["pyflyte", "register", "--help"], check=False, capture_output=True)
+    combined = f"{help_text.stdout}\n{help_text.stderr}"
+    return "--service-account" in combined
+
+
 def build_register_env() -> dict[str, str]:
     register_env = os.environ.copy()
     register_env["TRAIN_TASK_IMAGE"] = TRAIN_TASK_IMAGE
@@ -544,9 +561,10 @@ def build_register_command(registration_version: str) -> list[str]:
         TRAIN_TASK_IMAGE,
         "--version",
         registration_version,
-        "--service-account",
-        TRAIN_SERVICE_ACCOUNT,
     ]
+
+    if pyflyte_register_supports_service_account():
+        cmd.extend(["--service-account", TRAIN_SERVICE_ACCOUNT])
 
     supports_copy, supports_fast = pyflyte_register_supports_copy_or_fast_flag()
     if supports_copy:
@@ -639,9 +657,7 @@ def create_execution_from_spec(exec_spec_file: Path) -> None:
 
 
 def execute_launch_plan(*, latest: bool | None = None, version: str | None = None) -> None:
-    require_bin("kubectl")
     require_bin("flytectl")
-
     require_preflight_for_execution()
 
     start_port_forward()
@@ -654,11 +670,8 @@ def execute_launch_plan(*, latest: bool | None = None, version: str | None = Non
     if not effective_latest and not effective_version:
         fatal("launch-plan version required when latest is disabled")
 
-    fd, temp_path = tempfile.mkstemp(prefix=f"{launch_plan_name}.", suffix=".yaml")
-    os.close(fd)
-    exec_spec_file = Path(temp_path)
-
-    try:
+    with tempfile.TemporaryDirectory(prefix=f"{launch_plan_name}.") as tmpdir:
+        exec_spec_file = Path(tmpdir) / "exec.yaml"
         log(f"Launching: {launch_plan_name}")
         fetch_launch_plan_exec_spec(
             launch_plan_name,
@@ -668,207 +681,6 @@ def execute_launch_plan(*, latest: bool | None = None, version: str | None = Non
         )
         log(f"Creating execution from {exec_spec_file}")
         create_execution_from_spec(exec_spec_file)
-    finally:
-        exec_spec_file.unlink(missing_ok=True)
-
-
-def get_execution_pods(execution_id: str) -> list[str]:
-    cp = run_cmd(
-        [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            TASK_NAMESPACE,
-            "-l",
-            f"execution-id={execution_id}",
-            "-o",
-            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
-        ],
-        check=False,
-        capture_output=True,
-    )
-    pods = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
-    if pods:
-        return pods
-
-    cp = run_cmd(
-        [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            TASK_NAMESPACE,
-            "-o",
-            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
-        ],
-        check=False,
-        capture_output=True,
-    )
-    return [line.strip() for line in cp.stdout.splitlines() if execution_id in line]
-
-
-def get_execution_rayjobs(execution_id: str) -> list[str]:
-    cp = run_cmd(
-        [
-            "kubectl",
-            "get",
-            "rayjobs",
-            "-n",
-            TASK_NAMESPACE,
-            "-l",
-            f"execution-id={execution_id}",
-            "-o",
-            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
-        ],
-        check=False,
-        capture_output=True,
-    )
-    jobs = [line.strip() for line in cp.stdout.splitlines() if line.strip()]
-    if jobs:
-        return jobs
-
-    cp = run_cmd(
-        [
-            "kubectl",
-            "get",
-            "rayjobs",
-            "-n",
-            TASK_NAMESPACE,
-            "-o",
-            'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
-        ],
-        check=False,
-        capture_output=True,
-    )
-    return [line.strip() for line in cp.stdout.splitlines() if execution_id in line]
-
-
-def diagnose_execution(execution_id: str) -> None:
-    start_port_forward()
-    init_flytectl()
-
-    print("=== EXECUTION ===")
-    run_cmd(
-        [
-            "flytectl",
-            "get",
-            "execution",
-            execution_id,
-            "-p",
-            REMOTE_PROJECT,
-            "-d",
-            REMOTE_DOMAIN,
-        ],
-        check=False,
-    )
-
-    print("=== EXECUTION DETAILS ===")
-    run_cmd(
-        [
-            "flytectl",
-            "get",
-            "execution",
-            execution_id,
-            "-p",
-            REMOTE_PROJECT,
-            "-d",
-            REMOTE_DOMAIN,
-            "--details",
-        ],
-        check=False,
-    )
-
-    pods = get_execution_pods(execution_id)
-    if pods:
-        print("=== MATCHING PODS ===")
-        run_cmd(["kubectl", "get", "pods", "-n", TASK_NAMESPACE, "-o", "wide"], check=False)
-        for pod in pods:
-            print(f"--- POD {pod} ---")
-            run_cmd(["kubectl", "describe", "pod", pod, "-n", TASK_NAMESPACE], check=False)
-            run_cmd(
-                ["kubectl", "logs", pod, "-n", TASK_NAMESPACE, "--all-containers=true", "--tail=120"],
-                check=False,
-            )
-    else:
-        print(f"No pod matched execution {execution_id}")
-
-    jobs = get_execution_rayjobs(execution_id)
-    if jobs:
-        print("=== MATCHING RAYJOBS ===")
-        run_cmd(["kubectl", "get", "rayjobs", "-n", TASK_NAMESPACE, "-o", "wide"], check=False)
-        for job in jobs:
-            print(f"--- RAYJOB {job} ---")
-            run_cmd(["kubectl", "describe", "rayjob", job, "-n", TASK_NAMESPACE], check=False)
-    else:
-        print(f"No RayJob matched execution {execution_id}")
-
-
-def delete_execution(execution_id: str) -> None:
-    start_port_forward()
-    init_flytectl()
-
-    log(f"Deleting execution {execution_id}")
-    run_cmd(
-        ["flytectl", "delete", "execution", execution_id, "-p", REMOTE_PROJECT, "-d", REMOTE_DOMAIN],
-        check=False,
-    )
-
-    run_cmd(
-        [
-            "kubectl",
-            "delete",
-            "rayjob",
-            "-n",
-            TASK_NAMESPACE,
-            "-l",
-            f"execution-id={execution_id}",
-            "--ignore-not-found=true",
-        ],
-        check=False,
-    )
-    run_cmd(
-        [
-            "kubectl",
-            "delete",
-            "pod",
-            "-n",
-            TASK_NAMESPACE,
-            "-l",
-            f"execution-id={execution_id}",
-            "--ignore-not-found=true",
-        ],
-        check=False,
-    )
-
-
-def cleanup_stale_resources() -> None:
-    run_cmd(
-        [
-            "kubectl",
-            "delete",
-            "rayjob",
-            "-n",
-            TASK_NAMESPACE,
-            "-l",
-            "execution-id",
-            "--ignore-not-found=true",
-        ],
-        check=False,
-    )
-    run_cmd(
-        [
-            "kubectl",
-            "delete",
-            "pod",
-            "-n",
-            TASK_NAMESPACE,
-            "-l",
-            "execution-id",
-            "--ignore-not-found=true",
-        ],
-        check=False,
-    )
 
 
 def register_and_run() -> None:
@@ -877,20 +689,16 @@ def register_and_run() -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="run.py")
+    parser = argparse.ArgumentParser(
+        prog="run.py",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Register and execute the train workflow.",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("register", help="Register train workflows and launch plans")
     sub.add_parser("train", help="Execute the train workflow")
     sub.add_parser("up", help="Register and then execute train")
-
-    diag = sub.add_parser("diagnose", help="Inspect a Flyte execution and related Kubernetes resources")
-    diag.add_argument("execution_id")
-
-    delete = sub.add_parser("delete", help="Delete a Flyte execution and matching Kubernetes resources")
-    delete.add_argument("execution_id")
-
-    sub.add_parser("reset", help="Delete leftover train Ray / pod resources in the target namespace")
     return parser
 
 
@@ -921,18 +729,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         start_port_forward()
         init_flytectl()
         register_and_run()
-        return 0
-
-    if args.command == "diagnose":
-        diagnose_execution(args.execution_id)
-        return 0
-
-    if args.command == "delete":
-        delete_execution(args.execution_id)
-        return 0
-
-    if args.command == "reset":
-        cleanup_stale_resources()
         return 0
 
     return 1

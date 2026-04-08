@@ -611,8 +611,8 @@ def build_values() -> dict[str, Any]:
             },
             "task_resource_defaults": {
                 "task_resources": {
-                    "defaults": {"cpu": "100m", "memory": "500Mi"},
-                    "limits": {"cpu": "2", "memory": "1Gi", "gpu": 1},
+                    "defaults": {"cpu": "500m", "memory": "1500Mi"},
+                    "limits": {"cpu": "6", "memory": "6Gi", "gpu": 1},
                 }
             },
             "admin": {
