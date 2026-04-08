@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from flytekit import Resources, task
-from workflows.train.tasks.shared_utils import log_step, logger, upload_file_to_s3, write_json
 
 from workflows.train.shared_utils import (
     CANDIDATE_CONFIGS,
@@ -26,12 +25,16 @@ from workflows.train.shared_utils import (
     export_onnx_model,
     fit_lgbm_candidate,
     load_iceberg_table,
+    log_step,
+    logger,
     read_table_as_dataframe,
     split_by_date_fraction,
     split_train_test_by_date,
     table_snapshot_lineage,
     train_final_model,
+    upload_file_to_s3,
     validate_raw_dataframe,
+    write_json,
 )
 
 ICEBERG_REST_URI = os.environ.get(
@@ -171,8 +174,8 @@ def _materialize_training_bundle(
 @task(
     cache=False,
     retries=1,
-    requests=Resources(cpu="2", mem="4Gi"),
-    limits=Resources(cpu="4", mem="8Gi"),
+    requests=Resources(cpu="2", mem="2Gi"),
+    limits=Resources(cpu="4", mem="4Gi"),
 )
 def train_model_task(
     train_num_threads: int,

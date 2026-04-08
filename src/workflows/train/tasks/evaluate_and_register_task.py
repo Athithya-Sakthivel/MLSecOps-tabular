@@ -14,7 +14,6 @@ import onnxruntime as ort
 import pandas as pd
 from flytekit import Resources, task
 from mlflow.models import infer_signature
-from workflows.train.tasks.shared_utils import log_step, logger
 
 from workflows.train.shared_utils import (
     EXPECTED_COLUMNS,
@@ -30,6 +29,8 @@ from workflows.train.shared_utils import (
     feature_digest,
     from_log_target,
     load_iceberg_table,
+    log_step,
+    logger,
     numeric_metrics,
     prepare_model_features,
     read_table_as_dataframe,

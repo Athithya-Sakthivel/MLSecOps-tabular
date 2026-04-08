@@ -1,17 +1,152 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
+import os
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date
+from pathlib import Path
+from urllib.parse import urlparse
 
+import boto3
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import polars as pl
 from pyiceberg.catalog import load_catalog
 from sklearn.metrics import mean_absolute_error, mean_squared_error, median_absolute_error
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
+
+
+def configure_logging() -> None:
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        stream=sys.stdout,
+        format="%(asctime)sZ %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        force=True,
+    )
+    logging.Formatter.converter = time.gmtime
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def log_step(step_name: str) -> Iterator[None]:
+    started = time.perf_counter()
+    logger.info("%s started", step_name)
+    try:
+        yield
+    except Exception:
+        elapsed = time.perf_counter() - started
+        logger.exception("%s failed after %.2fs", step_name, elapsed)
+        raise
+    else:
+        elapsed = time.perf_counter() - started
+        logger.info("%s completed in %.2fs", step_name, elapsed)
+
+
+def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    parsed = urlparse(s3_uri)
+    if parsed.scheme != "s3":
+        raise ValueError(f"Expected s3:// URI, got: {s3_uri!r}")
+    bucket = parsed.netloc.strip()
+    key = parsed.path.lstrip("/").strip()
+    if not bucket or not key:
+        raise ValueError(f"Malformed S3 URI: {s3_uri!r}")
+    return bucket, key
+
+
+def require_static_aws_credentials_if_needed(*, use_iam: bool) -> None:
+    if use_iam:
+        return
+
+    missing: list[str] = []
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        if not os.environ.get(key, "").strip():
+            missing.append(key)
+
+    if missing:
+        raise RuntimeError(
+            "USE_IAM=false requires AWS credentials in the runtime environment: "
+            + ", ".join(missing)
+        )
+
+
+def s3_client(*, use_iam: bool):
+    require_static_aws_credentials_if_needed(use_iam=use_iam)
+    return boto3.client("s3")
+
+
+def upload_file_to_s3(local_path: Path, s3_uri: str, *, use_iam: bool) -> str:
+    bucket, key = parse_s3_uri(s3_uri)
+    logger.info("uploading %s -> s3://%s/%s", local_path, bucket, key)
+    s3_client(use_iam=use_iam).upload_file(str(local_path), bucket, key)
+    return s3_uri
+
+
+def download_file_from_s3(s3_uri: str, local_path: Path, *, use_iam: bool) -> Path:
+    bucket, key = parse_s3_uri(s3_uri)
+    logger.info("downloading s3://%s/%s -> %s", bucket, key, local_path)
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    s3_client(use_iam=use_iam).download_file(bucket, key, str(local_path))
+    return local_path
+
+
+def write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+def train_final_model(
+    train_eval_df: pd.DataFrame,
+    best_candidate: CandidateConfig,
+    final_num_boost_round: int,
+    label_cap_seconds: float,
+    num_threads: int,
+    category_levels: dict[str, list[int]],
+) -> lgb.LGBMRegressor:
+    params = make_base_params(num_threads)
+    params.update(
+        {
+            "learning_rate": float(best_candidate.learning_rate),
+            "num_leaves": int(best_candidate.num_leaves),
+            "max_depth": int(best_candidate.max_depth),
+            "min_child_samples": int(best_candidate.min_child_samples),
+            "subsample": float(best_candidate.subsample),
+            "feature_fraction": float(best_candidate.feature_fraction),
+            "reg_alpha": float(best_candidate.reg_alpha),
+            "reg_lambda": float(best_candidate.reg_lambda),
+        }
+    )
+
+    train_prepared = prepare_training_frame(train_eval_df, category_levels)
+    train_X = train_prepared[MODEL_FEATURE_COLUMNS]
+    y_train_raw = train_prepared[LABEL_COLUMN].to_numpy(dtype="float32")
+    y_train = to_log_target(y_train_raw, label_cap_seconds)
+
+    model = lgb.LGBMRegressor(**params, n_estimators=int(final_num_boost_round))
+    model.fit(train_X, y_train, categorical_feature=CATEGORICAL_COLUMNS)
+    return model
+
+    
+def numeric_metrics(metrics: dict[str, object]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key, value in metrics.items():
+        if isinstance(value, (int, float, np.floating)):
+            out[key] = float(value)
+    return out
+
 
 TABLE_IDENTIFIER_TUPLE = ("gold", "trip_training_matrix")
 TABLE_IDENTIFIER = "gold.trip_training_matrix"
