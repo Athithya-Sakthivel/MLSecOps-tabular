@@ -174,34 +174,6 @@ cluster_exists(){
   kubectl -n "${TARGET_NS}" get cluster "${CLUSTER_NAME}" >/dev/null 2>&1
 }
 
-cluster_backup_server_name(){
-  kubectl -n "${TARGET_NS}" get cluster "${CLUSTER_NAME}"     -o jsonpath='{.spec.backup.barmanObjectStore.serverName}' 2>/dev/null || true
-}
-
-cluster_backup_destination_path(){
-  kubectl -n "${TARGET_NS}" get cluster "${CLUSTER_NAME}"     -o jsonpath='{.spec.backup.barmanObjectStore.destinationPath}' 2>/dev/null || true
-}
-
-resolve_live_backup_lineage(){
-  if cluster_exists; then
-    local live_server live_dest
-    live_server="$(cluster_backup_server_name)"
-    live_dest="$(cluster_backup_destination_path)"
-    BACKUP_ACTIVE_SERVER_NAME="$(safe_dns_name "${live_server:-${PG_SERVER_NAME}}")"
-    if [[ -n "${live_dest}" ]]; then
-      BACKUP_DESTINATION_PATH="${live_dest%/}/"
-    else
-      compose_backup_destination_path
-    fi
-    [[ -n "${BACKUP_ACTIVE_SERVER_NAME}" ]] || BACKUP_ACTIVE_SERVER_NAME="$(safe_dns_name "${PG_SERVER_NAME}")"
-    log "live lineage discovered from cluster spec: serverName=${BACKUP_ACTIVE_SERVER_NAME} prefix=$(lineage_prefix_for "${BACKUP_ACTIVE_SERVER_NAME}")"
-    return 0
-  fi
-
-  resolve_fresh_target_server_name
-  compose_backup_destination_path
-}
-
 compose_backup_destination_path(){
   if [[ -n "${BACKUP_DESTINATION_PATH}" ]]; then
     BACKUP_DESTINATION_PATH="${BACKUP_DESTINATION_PATH%/}/"
@@ -961,7 +933,6 @@ deploy_fresh(){
   ensure_cnpg_operator
   require_aws_cli
   validate_backup_inputs
-  ensure_aws_secret
   ensure_fresh_lineage
   print_runtime_context "deploy"
 
@@ -992,7 +963,6 @@ deploy_restore(){
   ensure_cnpg_operator
   require_aws_cli
   validate_backup_inputs
-  ensure_aws_secret
   validate_restore_inputs
   ensure_restore_lineage
   print_runtime_context "restore"
@@ -1035,8 +1005,7 @@ cmd_backup(){
   ensure_cnpg_operator
   require_aws_cli
   validate_backup_inputs
-  ensure_aws_secret
-  resolve_live_backup_lineage
+  resolve_fresh_target_server_name
   print_runtime_context "backup"
 
   local backup_name
@@ -1065,12 +1034,8 @@ cmd_destroy(){
 }
 
 status_cluster(){
-  if cluster_exists; then
-    resolve_live_backup_lineage
-  else
-    resolve_fresh_target_server_name
-    compose_backup_destination_path
-  fi
+  resolve_fresh_target_server_name
+  compose_backup_destination_path
 
   echo
   echo "=== ${CLUSTER_NAME} ==="
@@ -1109,7 +1074,6 @@ status_cluster(){
   echo "  source-prefix: $(lineage_prefix_for "$(source_lineage_server_name)")"
   echo "  destination-serverName: ${BACKUP_ACTIVE_SERVER_NAME}"
   echo "  destination-prefix: $(lineage_prefix_for "${BACKUP_ACTIVE_SERVER_NAME}")"
-  echo "  backup-destination-path: ${BACKUP_DESTINATION_PATH}"
 }
 
 cmd_status(){

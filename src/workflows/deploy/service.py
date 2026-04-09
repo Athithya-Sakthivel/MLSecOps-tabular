@@ -21,7 +21,6 @@ from schemas import build_feature_matrix, coerce_instances, split_model_outputs
 from telemetry import initialize_telemetry
 
 logger = logging.getLogger("tabular-inference")
-
 SETTINGS = get_settings()
 
 
@@ -323,6 +322,77 @@ class TabularInferenceService:
             "model.path": str(self.loaded_model.model_path),
         }
 
+    @serve.batch(
+        max_batch_size=SETTINGS.batch_max_size,
+        batch_wait_timeout_s=SETTINGS.batch_wait_timeout_s,
+    )
+    async def _batched_predict(
+        self,
+        rows_batch: list[list[dict[str, Any]]],
+    ) -> list[list[dict[str, Any]]]:
+        if not rows_batch:
+            return []
+
+        batch_start = time.perf_counter()
+        request_count = len(rows_batch)
+        batch_instance_count = sum(len(rows) for rows in rows_batch)
+
+        if batch_instance_count == 0:
+            return [[] for _ in rows_batch]
+
+        flattened_rows: list[dict[str, Any]] = [row for rows in rows_batch for row in rows]
+
+        with self.tracer.start_as_current_span("onnx_inference") as span:
+            span.set_attribute("batch.request_count", request_count)
+            span.set_attribute("batch.size", batch_instance_count)
+            span.set_attribute("model.name", self.model_name)
+            span.set_attribute("model.version", self.effective_model_version)
+            span.set_attribute("onnx.input.name", self.input_name)
+            span.set_attribute("onnx.provider", ",".join(self.ort_providers))
+
+            feature_matrix = build_feature_matrix(
+                flattened_rows,
+                self.feature_order,
+                allow_extra_features=self.schema.allow_extra_features,
+            )
+
+            outputs = await asyncio.to_thread(
+                self.session.run,
+                self.output_names,
+                {self.input_name: feature_matrix},
+            )
+
+        inference_ms = (time.perf_counter() - batch_start) * 1000.0
+        self.inference_duration_histogram.record(
+            inference_ms,
+            attributes={
+                "model.name": self.model_name,
+                "model.version": self.effective_model_version,
+            },
+        )
+        self.inference_batch_size_histogram.record(
+            batch_instance_count,
+            attributes={
+                "model.name": self.model_name,
+                "model.version": self.effective_model_version,
+            },
+        )
+
+        all_predictions = split_model_outputs(
+            outputs,
+            self.output_names,
+            row_count=batch_instance_count,
+        )
+
+        partitioned: list[list[dict[str, Any]]] = []
+        offset = 0
+        for rows in rows_batch:
+            row_count = len(rows)
+            partitioned.append(all_predictions[offset : offset + row_count])
+            offset += row_count
+
+        return partitioned
+
     @api.post("/predict", response_model=PredictResponse)
     async def predict(self, request: Request) -> PredictResponse:
         route = "/predict"
@@ -332,21 +402,17 @@ class TabularInferenceService:
 
         try:
             payload = await request.json()
-
             rows = coerce_instances(payload)
             n_instances = len(rows)
 
+            if n_instances < 1:
+                raise ValueError("At least one instance is required")
             if n_instances > self.settings.max_instances_per_request:
                 raise ValueError(
                     f"Too many instances: {n_instances} > {self.settings.max_instances_per_request}"
                 )
 
             with self.tracer.start_as_current_span("prepare_input") as span:
-                feature_matrix = build_feature_matrix(
-                    rows,
-                    self.feature_order,
-                    allow_extra_features=self.schema.allow_extra_features,
-                )
                 span.set_attribute("batch.size", n_instances)
                 span.set_attribute("model.name", self.model_name)
                 span.set_attribute("model.version", self.effective_model_version)
@@ -361,36 +427,8 @@ class TabularInferenceService:
             )
             inference_started = True
 
-            with self.tracer.start_as_current_span("onnx_inference") as span:
-                model_start = time.perf_counter()
-                outputs = await asyncio.to_thread(
-                    self.session.run,
-                    self.output_names,
-                    {self.input_name: feature_matrix},
-                )
-                inference_ms = (time.perf_counter() - model_start) * 1000.0
-                span.set_attribute("batch.size", n_instances)
-                span.set_attribute("model.name", self.model_name)
-                span.set_attribute("model.version", self.effective_model_version)
-                span.set_attribute("onnx.input.name", self.input_name)
-                span.set_attribute("onnx.provider", ",".join(self.ort_providers))
-
-            self.inference_duration_histogram.record(
-                inference_ms,
-                attributes={
-                    "model.name": self.model_name,
-                    "model.version": self.effective_model_version,
-                },
-            )
-            self.inference_batch_size_histogram.record(
-                n_instances,
-                attributes={
-                    "model.name": self.model_name,
-                    "model.version": self.effective_model_version,
-                },
-            )
-
-            predictions = split_model_outputs(outputs, self.output_names, row_count=n_instances)
+            predictions_batch = await self._batched_predict(rows)
+            predictions = predictions_batch[0] if predictions_batch else []
 
             total_ms = (time.perf_counter() - start) * 1000.0
             if total_ms >= self.settings.slow_request_ms:

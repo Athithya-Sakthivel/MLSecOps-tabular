@@ -103,7 +103,7 @@ print_summary() {
   echo ""
   echo "Results: ${passed} passed, ${failed} failed"
   if [[ ${failed} -eq 0 ]]; then
-    echo "✓ All tests passed"
+    echo "✓ All CRUD tests passed"
     return 0
   else
     echo "✗ Some tests failed"

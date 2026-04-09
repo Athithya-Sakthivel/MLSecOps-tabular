@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import atexit
 import base64
+import contextlib
 import copy
 import os
+import socket
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import yaml
 
@@ -19,8 +23,8 @@ TARGET_NS = os.environ.get("TARGET_NS", "flyte")
 POSTGRES_NS = os.environ.get("POSTGRES_NS", "default")
 CNPG_CLUSTER = os.environ.get("CNPG_CLUSTER", "postgres-cluster")
 POOLER_SERVICE = os.environ.get("POOLER_SERVICE", "postgres-pooler")
-DB_ACCESS_MODE = os.environ.get("DB_ACCESS_MODE", "rw")
-DB_HOST = os.environ.get("DB_HOST", "")
+DB_ACCESS_MODE = os.environ.get("DB_ACCESS_MODE", "rw").strip().lower()
+DB_HOST = os.environ.get("DB_HOST", "").strip()
 POOLER_PORT = int(os.environ.get("POOLER_PORT", "5432"))
 
 DB_SECRET_NAME = os.environ.get("DB_SECRET_NAME", "db-pass")
@@ -37,26 +41,16 @@ FLYTE_STORAGE_TYPE = os.environ.get("FLYTE_STORAGE_TYPE", "s3").strip().lower()
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-south-1")
 S3_BUCKET = os.environ.get("S3_BUCKET", "e2e-mlops-data-681802563986")
-S3_PREFIX = os.environ.get("S3_PREFIX", "")
-S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
-AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
-AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "")
-AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN", "")
+S3_PREFIX = os.environ.get("S3_PREFIX", "").strip("/")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").strip()
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+AWS_SESSION_TOKEN = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+AWS_ROLE_ARN = os.environ.get("AWS_ROLE_ARN", "").strip()
 
 FLYTE_INGRESS_ENABLED = os.environ.get("FLYTE_INGRESS_ENABLED", "false")
 FLYTE_INGRESS_CLASS_NAME = os.environ.get("FLYTE_INGRESS_CLASS_NAME", "")
 FLYTE_SEPARATE_GRPC_INGRESS = os.environ.get("FLYTE_SEPARATE_GRPC_INGRESS", "false")
-
-FLYTE_CLUSTER_RESOURCE_MANAGER_ENABLED = os.environ.get("FLYTE_CLUSTER_RESOURCE_MANAGER_ENABLED", "true")
-FLYTE_WORKFLOW_SCHEDULER_ENABLED = os.environ.get("FLYTE_WORKFLOW_SCHEDULER_ENABLED", "false")
-FLYTE_WORKFLOW_NOTIFICATIONS_ENABLED = os.environ.get("FLYTE_WORKFLOW_NOTIFICATIONS_ENABLED", "false")
-FLYTE_EXTERNAL_EVENTS_ENABLED = os.environ.get("FLYTE_EXTERNAL_EVENTS_ENABLED", "false")
-FLYTE_CLOUD_EVENTS_ENABLED = os.environ.get("FLYTE_CLOUD_EVENTS_ENABLED", "false")
-FLYTE_CONNECTOR_ENABLED = os.environ.get("FLYTE_CONNECTOR_ENABLED", "false")
-FLYTE_SPARK_OPERATOR_ENABLED = os.environ.get("FLYTE_SPARK_OPERATOR_ENABLED", "false")
-FLYTE_DASK_OPERATOR_ENABLED = os.environ.get("FLYTE_DASK_OPERATOR_ENABLED", "false")
-FLYTE_DATABRICKS_ENABLED = os.environ.get("FLYTE_DATABRICKS_ENABLED", "false")
 
 CHART_REPO_NAME = os.environ.get("CHART_REPO_NAME", "flyteorg")
 CHART_REPO_URL = os.environ.get("CHART_REPO_URL", "https://helm.flyte.org")
@@ -69,12 +63,16 @@ ROLLOUT_TIMEOUT = os.environ.get("ROLLOUT_TIMEOUT", "1200s")
 FLYTE_ATOMIC = os.environ.get("FLYTE_ATOMIC", "false").lower() in {"1", "true", "yes", "y", "on"}
 
 FLYTE_TASK_NAMESPACES = os.environ.get("FLYTE_TASK_NAMESPACES", "flytesnacks-development")
+TASK_SERVICE_ACCOUNT = os.environ.get("TASK_SERVICE_ACCOUNT", "ray").strip() or "ray"
 TASK_AWS_SECRET_NAME = os.environ.get("TASK_AWS_SECRET_NAME", "flyte-aws-credentials")
+
+DELETE_TARGET_NAMESPACE = os.environ.get("DELETE_TARGET_NAMESPACE", "true").lower() in {"1", "true", "yes", "y", "on"}
+DELETE_TASK_NAMESPACES = os.environ.get("DELETE_TASK_NAMESPACES", "false").lower() in {"1", "true", "yes", "y", "on"}
+DELETE_FLYTE_CRDS = os.environ.get("DELETE_FLYTE_CRDS", "false").lower() in {"1", "true", "yes", "y", "on"}
 
 APP_DB_USER = ""
 APP_DB_PASSWORD = ""
-CONTROL_PLANE_AWS_ANNOTATION_KEY = ""
-CONTROL_PLANE_AWS_ANNOTATION_VALUE = ""
+PORT_FORWARD_PROC: subprocess.Popen[str] | None = None
 
 
 def ts() -> str:
@@ -85,7 +83,7 @@ def log(msg: str) -> None:
     print(f"[{ts()}] [flyte] {msg}", file=sys.stderr, flush=True)
 
 
-def fatal(msg: str) -> None:
+def fatal(msg: str) -> NoReturn:
     print(f"[{ts()}] [flyte][FATAL] {msg}", file=sys.stderr, flush=True)
     raise SystemExit(1)
 
@@ -97,13 +95,23 @@ def require_bin(name: str) -> None:
         fatal(f"{name} required in PATH")
 
 
-def run(cmd: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str],
+    *,
+    input_text: str | None = None,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+    cwd: str | Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     cp = subprocess.run(
         cmd,
         input=input_text,
         text=True,
         capture_output=True,
         check=False,
+        env=env,
+        cwd=cwd,
+        close_fds=True,
     )
     if check and cp.returncode != 0:
         detail: list[str] = []
@@ -133,6 +141,13 @@ def split_namespaces(value: str) -> list[str]:
         if part:
             out.append(part)
     return out
+
+
+def join_uri_prefix(scheme: str, bucket_or_container: str, prefix: str = "") -> str:
+    prefix = prefix.strip("/")
+    if prefix:
+        return f"{scheme}://{bucket_or_container}/{prefix}/"
+    return f"{scheme}://{bucket_or_container}/"
 
 
 def apply_manifest(manifest: dict[str, Any]) -> None:
@@ -182,77 +197,68 @@ def ensure_secret(namespace: str, name: str, string_data: dict[str, str]) -> Non
 
 
 def secret_value(namespace: str, secret_name: str, key: str) -> str:
-    try:
-        raw = run_text(
-            [
-                "kubectl",
-                "-n",
-                namespace,
-                "get",
-                "secret",
-                secret_name,
-                "-o",
-                f"jsonpath={{.data.{key}}}",
-            ]
-        )
-    except subprocess.CalledProcessError:
-        return ""
-
-    if not raw:
+    cp = run(
+        [
+            "kubectl",
+            "-n",
+            namespace,
+            "get",
+            "secret",
+            secret_name,
+            "-o",
+            f"jsonpath={{.data.{key}}}",
+        ],
+        check=False,
+    )
+    if cp.returncode != 0 or not cp.stdout.strip():
         return ""
     try:
-        return base64.b64decode(raw).decode("utf-8")
+        return base64.b64decode(cp.stdout.strip()).decode("utf-8")
     except Exception:
         return ""
 
 
 def find_app_secret_name() -> str:
     selector = f"cnpg.io/cluster={CNPG_CLUSTER},cnpg.io/userType=app"
-    try:
-        name = run_text(
-            [
-                "kubectl",
-                "-n",
-                POSTGRES_NS,
-                "get",
-                "secret",
-                "-l",
-                selector,
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ]
-        )
-        if name:
-            return name
-    except subprocess.CalledProcessError:
-        pass
+    cp = run(
+        [
+            "kubectl",
+            "-n",
+            POSTGRES_NS,
+            "get",
+            "secret",
+            "-l",
+            selector,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
+        check=False,
+    )
+    if cp.returncode == 0 and cp.stdout.strip():
+        return cp.stdout.strip()
 
     fallback = f"{CNPG_CLUSTER}-app"
-    try:
-        run_text(["kubectl", "-n", POSTGRES_NS, "get", "secret", fallback])
-        return fallback
-    except subprocess.CalledProcessError:
-        return ""
+    cp = run(["kubectl", "-n", POSTGRES_NS, "get", "secret", fallback], check=False)
+    return fallback if cp.returncode == 0 else ""
 
 
 def get_primary_pod() -> str:
     selector = f"cnpg.io/cluster={CNPG_CLUSTER},cnpg.io/instanceRole=primary"
-    try:
-        return run_text(
-            [
-                "kubectl",
-                "-n",
-                POSTGRES_NS,
-                "get",
-                "pods",
-                "-l",
-                selector,
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ]
-        )
-    except subprocess.CalledProcessError:
-        return ""
+    cp = run(
+        [
+            "kubectl",
+            "-n",
+            POSTGRES_NS,
+            "get",
+            "pods",
+            "-l",
+            selector,
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
+        check=False,
+    )
+    return cp.stdout.strip() if cp.returncode == 0 else ""
 
 
 def resolve_db_host() -> str:
@@ -273,7 +279,7 @@ def ensure_database(db_name: str) -> None:
     if not primary:
         fatal(f"CNPG primary pod not found for {CNPG_CLUSTER}")
 
-    exists = run_text(
+    exists = run(
         [
             "kubectl",
             "-n",
@@ -286,7 +292,7 @@ def ensure_database(db_name: str) -> None:
             f"psql -U postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='{db_name}';\"",
         ],
         check=False,
-    ).strip()
+    ).stdout.strip()
 
     if exists != "1":
         log(f"creating database {db_name}")
@@ -300,7 +306,7 @@ def ensure_database(db_name: str) -> None:
                 "--",
                 "sh",
                 "-lc",
-                f'psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE {db_name} OWNER \\"{APP_DB_USER}\\";"',
+                f'psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE {db_name} OWNER \\\"{APP_DB_USER}\\\";"',
             ],
             check=False,
         )
@@ -317,7 +323,7 @@ def ensure_database(db_name: str) -> None:
             "--",
             "sh",
             "-lc",
-            f'psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE {db_name} OWNER TO \\"{APP_DB_USER}\\";"',
+            f'psql -U postgres -v ON_ERROR_STOP=1 -c "ALTER DATABASE {db_name} OWNER TO \\\"{APP_DB_USER}\\\";"',
         ],
         check=False,
     )
@@ -331,17 +337,10 @@ def ensure_database(db_name: str) -> None:
             "--",
             "sh",
             "-lc",
-            f'psql -U postgres -d "{db_name}" -v ON_ERROR_STOP=1 -c "ALTER SCHEMA public OWNER TO \\"{APP_DB_USER}\\";"',
+            f'psql -U postgres -d "{db_name}" -v ON_ERROR_STOP=1 -c "ALTER SCHEMA public OWNER TO \\\"{APP_DB_USER}\\\";"',
         ],
         check=False,
     )
-
-
-def join_uri_prefix(scheme: str, bucket_or_container: str, prefix: str = "") -> str:
-    prefix = prefix.strip("/")
-    if prefix:
-        return f"{scheme}://{bucket_or_container}/{prefix}/"
-    return f"{scheme}://{bucket_or_container}/"
 
 
 def validate_static_aws_credentials() -> None:
@@ -378,12 +377,12 @@ def ensure_task_namespace_auth(namespace: str) -> None:
     if USE_IAM:
         if not AWS_ROLE_ARN:
             fatal("AWS_ROLE_ARN is required when USE_IAM=true")
-        ensure_serviceaccount(namespace, "ray", {"eks.amazonaws.com/role-arn": AWS_ROLE_ARN})
+        ensure_serviceaccount(namespace, TASK_SERVICE_ACCOUNT, {"eks.amazonaws.com/role-arn": AWS_ROLE_ARN})
     elif FLYTE_STORAGE_TYPE == "s3":
         ensure_accesskey_secret(namespace)
-        ensure_serviceaccount(namespace, "ray")
+        ensure_serviceaccount(namespace, TASK_SERVICE_ACCOUNT)
     else:
-        ensure_serviceaccount(namespace, "ray")
+        ensure_serviceaccount(namespace, TASK_SERVICE_ACCOUNT)
 
 
 def ensure_control_plane_secret() -> None:
@@ -442,13 +441,11 @@ def build_storage_block() -> dict[str, Any]:
 
 
 def build_values() -> dict[str, Any]:
-    storage_type = FLYTE_STORAGE_TYPE
     raw_prefix = os.environ.get("FLYTE_RAWOUTPUT_PREFIX", join_uri_prefix("s3", S3_BUCKET, S3_PREFIX))
     service_account = control_plane_serviceaccount_block()
+    task_secret_names = [TASK_AWS_SECRET_NAME] if FLYTE_STORAGE_TYPE == "s3" and not USE_IAM else []
 
-    task_secret_names = [TASK_AWS_SECRET_NAME] if storage_type == "s3" and not USE_IAM else []
-
-    values: dict[str, Any] = {
+    return {
         "deployRedoc": False,
         "flyteadmin": {
             "enabled": True,
@@ -486,7 +483,6 @@ def build_values() -> dict[str, Any]:
             "serviceAccount": copy.deepcopy(service_account),
             "service": {"type": "ClusterIP"},
         },
-        "flyteconnector": {"enabled": yaml_bool(FLYTE_CONNECTOR_ENABLED)},
         "flytepropeller": {
             "enabled": True,
             "manager": False,
@@ -661,24 +657,6 @@ def build_values() -> dict[str, Any]:
                     "serviceName": "flyte-pod-webhook",
                 },
             },
-            "enabled_plugins": {
-                "tasks": {
-                    "task-plugins": {
-                        "enabled-plugins": [
-                            "container",
-                            "sidecar",
-                            "k8s-array",
-                            "connector-service",
-                            "echo",
-                        ],
-                        "default-for-task-types": {
-                            "container": "container",
-                            "sidecar": "sidecar",
-                            "container_array": "k8s-array",
-                        },
-                    }
-                }
-            },
             "k8s": {
                 "plugins": {
                     "k8s": {
@@ -696,7 +674,7 @@ def build_values() -> dict[str, Any]:
             "remoteData": {
                 "remoteData": {
                     "region": AWS_REGION,
-                    "scheme": "s3" if storage_type == "s3" else "local",
+                    "scheme": "s3" if FLYTE_STORAGE_TYPE == "s3" else "local",
                     "signedUrls": {"durationMinutes": 3},
                 }
             },
@@ -710,16 +688,7 @@ def build_values() -> dict[str, Any]:
                 }
             },
         },
-        "workflow_scheduler": {"enabled": yaml_bool(FLYTE_WORKFLOW_SCHEDULER_ENABLED)},
-        "workflow_notifications": {"enabled": yaml_bool(FLYTE_WORKFLOW_NOTIFICATIONS_ENABLED)},
-        "external_events": {"enable": yaml_bool(FLYTE_EXTERNAL_EVENTS_ENABLED)},
-        "cloud_events": {"enable": yaml_bool(FLYTE_CLOUD_EVENTS_ENABLED)},
-        "cluster_resource_manager": {"enabled": yaml_bool(FLYTE_CLUSTER_RESOURCE_MANAGER_ENABLED)},
-        "sparkoperator": {"enabled": yaml_bool(FLYTE_SPARK_OPERATOR_ENABLED)},
-        "daskoperator": {"enabled": yaml_bool(FLYTE_DASK_OPERATOR_ENABLED)},
-        "databricks": {"enabled": yaml_bool(FLYTE_DATABRICKS_ENABLED)},
     }
-    return values
 
 
 def render_values_file(values: dict[str, Any]) -> None:
@@ -758,9 +727,205 @@ def ensure_release_namespace() -> None:
     ensure_namespace(TARGET_NS)
 
 
+def _task_namespace_bootstrap_manifest(namespace: str) -> str:
+    return f"""apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {TASK_SERVICE_ACCOUNT}
+  namespace: {namespace}
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - configmaps
+      - persistentvolumeclaims
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {TASK_SERVICE_ACCOUNT}
+  namespace: {namespace}
+subjects:
+  - kind: ServiceAccount
+    name: {TASK_SERVICE_ACCOUNT}
+    namespace: {namespace}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {TASK_SERVICE_ACCOUNT}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workflow-workload-quota
+  namespace: {namespace}
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: "4Gi"
+    limits.cpu: "16"
+    limits.memory: "4Gi"
+    pods: "60"
+    persistentvolumeclaims: "40"
+    services: "50"
+"""
+
+
+def bootstrap_manifest_quota_line() -> str:
+    return (
+        "requests.cpu=8, requests.memory=4Gi, limits.cpu=16, limits.memory=4Gi, "
+        "pods=60, persistentvolumeclaims=40, services=50"
+    )
+
+
+def _can_i(namespace: str, verb: str, resource: str, sa_name: str = TASK_SERVICE_ACCOUNT) -> bool:
+    cp = run(
+        [
+            "kubectl",
+            "auth",
+            "can-i",
+            verb,
+            resource,
+            "-n",
+            namespace,
+            f"--as=system:serviceaccount:{namespace}:{sa_name}",
+        ],
+        check=False,
+    )
+    return cp.returncode == 0 and cp.stdout.strip() == "yes"
+
+
+def ensure_task_namespace_ready(namespace: str) -> None:
+    ensure_task_namespace_auth(namespace)
+    require_bin("kubectl")
+    log(f"verifying namespace bootstrap for {namespace}")
+
+    ensure_namespace(namespace)
+    run(["kubectl", "apply", "-f", "-"], input_text=_task_namespace_bootstrap_manifest(namespace))
+    log(f"bootstrap applied for {namespace} with quota: {bootstrap_manifest_quota_line()}")
+
+    for kind in ("serviceaccount", "role", "rolebinding", "resourcequota"):
+        cp = run(["kubectl", "get", kind, TASK_SERVICE_ACCOUNT if kind != "resourcequota" else "workflow-workload-quota", "-n", namespace], check=False)
+        if cp.returncode != 0:
+            fatal(f"{kind} missing in {namespace}")
+
+    required_resources = ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    required_verbs = ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+    missing: list[str] = []
+    for resource in required_resources:
+        for verb in required_verbs:
+            if not _can_i(namespace, verb, resource):
+                missing.append(f"{verb} {resource}")
+    if not _can_i(namespace, "get", "pods/log"):
+        missing.append("get pods/log")
+
+    if missing:
+        fatal("service account lacks required Flyte permissions: " + ", ".join(missing))
+
+    log(f"bootstrap verified for {namespace}")
+
+
 def ensure_task_namespaces_ready() -> None:
     for namespace in split_namespaces(FLYTE_TASK_NAMESPACES):
-        ensure_task_namespace_auth(namespace)
+        ensure_task_namespace_ready(namespace)
+
+
+def stop_port_forward_if_any() -> None:
+    global PORT_FORWARD_PROC
+
+    proc = PORT_FORWARD_PROC
+    PORT_FORWARD_PROC = None
+    if proc is None:
+        return
+
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=10)
+
+
+def cleanup() -> None:
+    stop_port_forward_if_any()
+
+
+atexit.register(cleanup)
+
+
+def port_is_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def start_port_forward() -> None:
+    global PORT_FORWARD_PROC
+
+    if PORT_FORWARD_PROC is not None and PORT_FORWARD_PROC.poll() is None and port_is_open("127.0.0.1", 30080):
+        return
+
+    stop_port_forward_if_any()
+    log("starting flyteadmin port-forward 127.0.0.1:30080 -> flyte/svc/flyteadmin:80")
+
+    proc = subprocess.Popen(
+        [
+            "kubectl",
+            "-n",
+            TARGET_NS,
+            "port-forward",
+            "svc/flyteadmin",
+            "30080:80",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+        text=True,
+        close_fds=True,
+        start_new_session=True,
+    )
+    PORT_FORWARD_PROC = proc
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if port_is_open("127.0.0.1", 30080):
+            return
+        if proc.poll() is not None:
+            break
+        time.sleep(1)
+
+    stop_port_forward_if_any()
+    fatal("flyteadmin port-forward did not become ready")
+
+
+def init_flytectl() -> None:
+    run_text(
+        [
+            "flytectl",
+            "config",
+            "init",
+            "--host=127.0.0.1:30080",
+            "--insecure",
+            "--force",
+        ]
+    )
 
 
 def print_summary() -> None:
@@ -780,7 +945,10 @@ def print_summary() -> None:
     print(f"Task AWS secret name: {TASK_AWS_SECRET_NAME}")
     print(f"Task namespaces: {FLYTE_TASK_NAMESPACES}")
     print()
-    print(f"Local access:\nkubectl -n {TARGET_NS} port-forward svc/flyteadmin 30080:80")
+    print(
+        f"Local access:\n"
+        f"kubectl -n {TARGET_NS} port-forward svc/flyteadmin 30080:80"
+    )
 
 
 def dump_diagnostics() -> None:
@@ -803,7 +971,7 @@ def wait_for_rollouts() -> None:
                 'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}',
             ]
         )
-    except subprocess.CalledProcessError:
+    except Exception:
         deploys = ""
 
     for dep in [line.strip() for line in deploys.splitlines() if line.strip()]:
@@ -821,9 +989,84 @@ def wait_for_rollouts() -> None:
         )
 
 
+def _delete_namespace(namespace: str) -> None:
+    run(["kubectl", "delete", "namespace", namespace, "--ignore-not-found"], check=False)
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        cp = run(["kubectl", "get", "namespace", namespace], check=False)
+        if cp.returncode != 0:
+            return
+        time.sleep(2)
+
+    log(f"namespace {namespace} is stuck terminating; clearing finalizers")
+    run(
+        [
+            "kubectl",
+            "patch",
+            "namespace",
+            namespace,
+            "-p",
+            '{"metadata":{"finalizers":[]}}',
+            "--type=merge",
+        ],
+        check=False,
+    )
+    run(["kubectl", "delete", "namespace", namespace, "--ignore-not-found"], check=False)
+
+
+def delete_task_namespace_bootstrap(namespace: str) -> None:
+    for kind, name in (
+        ("secret", TASK_AWS_SECRET_NAME),
+        ("serviceaccount", TASK_SERVICE_ACCOUNT),
+        ("role", TASK_SERVICE_ACCOUNT),
+        ("rolebinding", TASK_SERVICE_ACCOUNT),
+        ("resourcequota", "workflow-workload-quota"),
+    ):
+        run(["kubectl", "-n", namespace, "delete", kind, name, "--ignore-not-found"], check=False)
+
+
+def delete_flyte_crds() -> None:
+    # Optional, because CRDs are cluster-scoped and sometimes shared across environments.
+    for crd in (
+        "workflows.flyte.org",
+        "launchplans.flyte.org",
+        "tasks.flyte.org",
+        "workflows.flyte.io",
+        "launchplans.flyte.io",
+        "tasks.flyte.io",
+    ):
+        run(["kubectl", "delete", "crd", crd, "--ignore-not-found"], check=False)
+
+
+def delete_all() -> None:
+    stop_port_forward_if_any()
+
+    run(["helm", "uninstall", RELEASE_NAME, "-n", TARGET_NS], check=False)
+
+    if DELETE_TARGET_NAMESPACE:
+        _delete_namespace(TARGET_NS)
+    else:
+        for kind, name in (("secret", DB_SECRET_NAME), ("secret", AUTH_SECRET_NAME), ("secret", TASK_AWS_SECRET_NAME)):
+            run(["kubectl", "-n", TARGET_NS, "delete", kind, name, "--ignore-not-found"], check=False)
+
+    for namespace in split_namespaces(FLYTE_TASK_NAMESPACES):
+        delete_task_namespace_bootstrap(namespace)
+        if DELETE_TASK_NAMESPACES:
+            _delete_namespace(namespace)
+
+    if DELETE_FLYTE_CRDS:
+        delete_flyte_crds()
+
+    log("deleted Flyte release and bootstrap objects")
+
+
+def require_bootstrap_prereqs() -> None:
+    require_prereqs()
+    validate_static_aws_credentials()
+
+
 def main() -> None:
     global APP_DB_USER, APP_DB_PASSWORD, DB_HOST, POOLER_PORT
-    global CONTROL_PLANE_AWS_ANNOTATION_KEY, CONTROL_PLANE_AWS_ANNOTATION_VALUE
 
     require_prereqs()
     ensure_release_namespace()
@@ -845,21 +1088,10 @@ def main() -> None:
     APP_DB_USER = app_user
     APP_DB_PASSWORD = app_password
     if app_port:
-        try:
+        with contextlib.suppress(ValueError):
             POOLER_PORT = int(app_port)
-        except ValueError:
-            pass
 
     resolve_db_host()
-
-    if FLYTE_STORAGE_TYPE == "s3" and USE_IAM:
-        if not AWS_ROLE_ARN:
-            fatal("AWS_ROLE_ARN is required when USE_IAM=true")
-        CONTROL_PLANE_AWS_ANNOTATION_KEY = "eks.amazonaws.com/role-arn"
-        CONTROL_PLANE_AWS_ANNOTATION_VALUE = AWS_ROLE_ARN
-    else:
-        CONTROL_PLANE_AWS_ANNOTATION_KEY = ""
-        CONTROL_PLANE_AWS_ANNOTATION_VALUE = ""
 
     ensure_database(FLYTE_ADMIN_DB)
     ensure_database(FLYTE_DATACATALOG_DB)
@@ -902,25 +1134,13 @@ def main() -> None:
     print_summary()
 
 
-def delete_all() -> None:
-    run(["kubectl", "-n", TARGET_NS, "delete", "deployment", RELEASE_NAME, "--ignore-not-found"], check=False)
-    run(["kubectl", "-n", TARGET_NS, "delete", "secret", DB_SECRET_NAME, "--ignore-not-found"], check=False)
-    run(["kubectl", "-n", TARGET_NS, "delete", "secret", AUTH_SECRET_NAME, "--ignore-not-found"], check=False)
-    run(["kubectl", "-n", TARGET_NS, "delete", "secret", TASK_AWS_SECRET_NAME, "--ignore-not-found"], check=False)
-    for namespace in split_namespaces(FLYTE_TASK_NAMESPACES):
-        run(["kubectl", "-n", namespace, "delete", "secret", TASK_AWS_SECRET_NAME, "--ignore-not-found"], check=False)
-        run(["kubectl", "-n", namespace, "delete", "serviceaccount", "ray", "--ignore-not-found"], check=False)
-    run(["helm", "uninstall", RELEASE_NAME, "-n", TARGET_NS], check=False)
-    log("deleted Flyte release and secrets")
-
-
 def cli() -> int:
     try:
         if len(sys.argv) == 1 or sys.argv[1] == "--rollout":
             main()
             return 0
         if sys.argv[1] == "--delete":
-            require_prereqs()
+            require_bootstrap_prereqs()
             delete_all()
             return 0
         if sys.argv[1] in {"--help", "-h"}:
@@ -935,9 +1155,12 @@ def cli() -> int:
                 "  AWS_SECRET_ACCESS_KEY=...\n"
                 "  AWS_SESSION_TOKEN=...\n"
                 "  AWS_ROLE_ARN=...\n"
-                "  FLYTE_TASK_NAMESPACES=flytesnacks-development[,other-namespace]\n"
+                "  FLYTE_TASK_NAMESPACES=namespace-a[,namespace-b]\n"
                 "  TASK_AWS_SECRET_NAME=flyte-aws-credentials\n"
-                "  FLYTE_SPARK_OPERATOR_ENABLED=true|false\n"
+                "  TASK_SERVICE_ACCOUNT=ray\n"
+                "  DELETE_TARGET_NAMESPACE=true|false\n"
+                "  DELETE_TASK_NAMESPACES=true|false\n"
+                "  DELETE_FLYTE_CRDS=true|false\n"
                 "  FLYTE_ATOMIC=true|false\n"
             )
             return 0

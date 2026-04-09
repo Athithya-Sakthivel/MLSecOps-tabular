@@ -5,62 +5,43 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
-DeploymentProfile = Literal["kind", "eks"]
+DeploymentProfile = Literal["prod"]
 
-PROFILE_DEFAULTS: dict[DeploymentProfile, dict[str, str]] = {
-    "kind": {
-        "SERVE_NUM_CPUS": "0.5",
-        "SERVE_MIN_REPLICAS": "1",
-        "SERVE_INITIAL_REPLICAS": "1",
-        "SERVE_MAX_REPLICAS": "1",
-        "SERVE_TARGET_ONGOING_REQUESTS": "1",
-        "SERVE_MAX_ONGOING_REQUESTS": "2",
-        "SERVE_BATCH_MAX_SIZE": "4",
-        "SERVE_BATCH_WAIT_TIMEOUT_S": "0.01",
-        "SERVE_HEALTH_CHECK_PERIOD_S": "10.0",
-        "SERVE_HEALTH_CHECK_TIMEOUT_S": "30.0",
-        "SERVE_GRACEFUL_SHUTDOWN_WAIT_LOOP_S": "2.0",
-        "SERVE_GRACEFUL_SHUTDOWN_TIMEOUT_S": "20.0",
-        "ORT_INTRA_OP_NUM_THREADS": "1",
-        "ORT_INTER_OP_NUM_THREADS": "1",
-        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
-        "OTEL_TRACES_SAMPLER_ARG": "0.10",
-        "LOG_LEVEL": "DEBUG",
-        "SLOW_REQUEST_MS": "1000.0",
-    },
-    "eks": {
-        "SERVE_NUM_CPUS": "1.0",
-        "SERVE_MIN_REPLICAS": "2",
-        "SERVE_INITIAL_REPLICAS": "2",
-        "SERVE_MAX_REPLICAS": "8",
-        "SERVE_TARGET_ONGOING_REQUESTS": "2",
-        "SERVE_MAX_ONGOING_REQUESTS": "3",
-        "SERVE_BATCH_MAX_SIZE": "16",
-        "SERVE_BATCH_WAIT_TIMEOUT_S": "0.005",
-        "SERVE_HEALTH_CHECK_PERIOD_S": "10.0",
-        "SERVE_HEALTH_CHECK_TIMEOUT_S": "30.0",
-        "SERVE_GRACEFUL_SHUTDOWN_WAIT_LOOP_S": "2.0",
-        "SERVE_GRACEFUL_SHUTDOWN_TIMEOUT_S": "20.0",
-        "ORT_INTRA_OP_NUM_THREADS": "0",
-        "ORT_INTER_OP_NUM_THREADS": "1",
-        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
-        "OTEL_TRACES_SAMPLER_ARG": "0.10",
-        "LOG_LEVEL": "WARNING",
-        "SLOW_REQUEST_MS": "500.0",
-    },
+# Fixed production baseline.
+# Keep these stable unless profiling or an incident specifically justifies a change.
+PROD_DEFAULTS: dict[str, str] = {
+    "SERVE_NUM_CPUS": "1.0",
+    "SERVE_MIN_REPLICAS": "1",
+    "SERVE_INITIAL_REPLICAS": "1",
+    "SERVE_MAX_REPLICAS": "8",
+    "SERVE_TARGET_ONGOING_REQUESTS": "2",
+    "SERVE_MAX_ONGOING_REQUESTS": "3",
+    "SERVE_UPSCALE_DELAY_S": "3.0",
+    "SERVE_DOWNSCALE_DELAY_S": "60.0",
+    "SERVE_BATCH_MAX_SIZE": "16",
+    "SERVE_BATCH_WAIT_TIMEOUT_S": "0.005",
+    "SERVE_HEALTH_CHECK_PERIOD_S": "10.0",
+    "SERVE_HEALTH_CHECK_TIMEOUT_S": "30.0",
+    "SERVE_GRACEFUL_SHUTDOWN_WAIT_LOOP_S": "2.0",
+    "SERVE_GRACEFUL_SHUTDOWN_TIMEOUT_S": "20.0",
+    "ORT_INTRA_OP_NUM_THREADS": "1",
+    "ORT_INTER_OP_NUM_THREADS": "1",
+    "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+    "OTEL_TRACES_SAMPLER_ARG": "0.10",
+    "LOG_LEVEL": "WARNING",
+    "SLOW_REQUEST_MS": "500.0",
 }
 
 
 def _profile() -> DeploymentProfile:
-    raw = os.getenv("DEPLOYMENT_PROFILE", "kind").strip().lower()
-    if raw not in PROFILE_DEFAULTS:
-        raise RuntimeError("DEPLOYMENT_PROFILE must be one of: kind, eks")
-    return raw  # type: ignore[return-value]
+    raw = os.getenv("DEPLOYMENT_PROFILE", "prod").strip().lower()
+    if raw != "prod":
+        raise RuntimeError("DEPLOYMENT_PROFILE is fixed to 'prod' in this build")
+    return "prod"
 
 
 def _profile_default(name: str, default: str) -> str:
-    profile = _profile()
-    return os.getenv(name, PROFILE_DEFAULTS[profile].get(name, default))
+    return os.getenv(name, PROD_DEFAULTS.get(name, default))
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -356,7 +337,7 @@ def get_settings() -> Settings:
     service_name = _env_str("OTEL_SERVICE_NAME", "inference-api")
     service_version = _env_str("SERVICE_VERSION", "v1")
     deployment_environment = _env_str("DEPLOYMENT_ENVIRONMENT", deployment_profile)
-    cluster_name = _env_str("K8S_CLUSTER_NAME", "kind" if deployment_profile == "kind" else "eks")
+    cluster_name = _env_str("K8S_CLUSTER_NAME", "production-cluster")
     instance_id = _env_str("POD_NAME", _env_str("HOSTNAME", "local"))
 
     model_version = _env_str("MODEL_VERSION", "v1")
@@ -375,8 +356,8 @@ def get_settings() -> Settings:
         "SERVE_MAX_ONGOING_REQUESTS",
         max(4, target_ongoing_requests + 1),
     )
-    upscale_delay_s = _env_float_profile("SERVE_UPSCALE_DELAY_S", 1.0)
-    downscale_delay_s = _env_float_profile("SERVE_DOWNSCALE_DELAY_S", 30.0)
+    upscale_delay_s = _env_float_profile("SERVE_UPSCALE_DELAY_S", 3.0)
+    downscale_delay_s = _env_float_profile("SERVE_DOWNSCALE_DELAY_S", 60.0)
     batch_max_size = _env_int_profile("SERVE_BATCH_MAX_SIZE", 16)
     batch_wait_timeout_s = _env_float_profile("SERVE_BATCH_WAIT_TIMEOUT_S", 0.005)
     serve_health_check_period_s = _env_float_profile("SERVE_HEALTH_CHECK_PERIOD_S", 10.0)
@@ -388,7 +369,7 @@ def get_settings() -> Settings:
         "SERVE_GRACEFUL_SHUTDOWN_TIMEOUT_S", 20.0
     )
 
-    ort_intra_op_num_threads = _env_int_profile("ORT_INTRA_OP_NUM_THREADS", 0)
+    ort_intra_op_num_threads = _env_int_profile("ORT_INTRA_OP_NUM_THREADS", 1)
     ort_inter_op_num_threads = _env_int_profile("ORT_INTER_OP_NUM_THREADS", 1)
     ort_providers = _env_tuple("ORT_PROVIDERS", ("CPUExecutionProvider",))
     ort_log_severity_level = _env_int("ORT_LOG_SEVERITY_LEVEL", 3)
@@ -409,15 +390,15 @@ def get_settings() -> Settings:
 
     otel_traces_sampler = _env_str(
         "OTEL_TRACES_SAMPLER",
-        PROFILE_DEFAULTS[deployment_profile]["OTEL_TRACES_SAMPLER"],
+        PROD_DEFAULTS["OTEL_TRACES_SAMPLER"],
     )
     trace_sample_ratio = _env_ratio_profile(
         "OTEL_TRACES_SAMPLER_ARG",
-        float(PROFILE_DEFAULTS[deployment_profile]["OTEL_TRACES_SAMPLER_ARG"]),
+        float(PROD_DEFAULTS["OTEL_TRACES_SAMPLER_ARG"]),
     )
 
     log_level = _validate_log_level(
-        _env_str("LOG_LEVEL", PROFILE_DEFAULTS[deployment_profile]["LOG_LEVEL"])
+        _env_str("LOG_LEVEL", PROD_DEFAULTS["LOG_LEVEL"])
     )
     slow_request_ms = _env_float_profile("SLOW_REQUEST_MS", 500.0)
 

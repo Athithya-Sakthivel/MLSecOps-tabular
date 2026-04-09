@@ -80,7 +80,8 @@ PYFLYTE_REGISTER_EXTRA_ARGS = _env_str("PYFLYTE_REGISTER_EXTRA_ARGS", "")
 
 RESOURCE_QUOTA_NAME = _env_str("TRAIN_RESOURCE_QUOTA_NAME", "ray-workload-quota")
 
-# Namespace quota is set to 4Gi RAM to match the intended train profile.
+# Namespace quota. This is separate from Flyte Admin's admission caps.
+# The runner can enforce namespace quota, but it cannot override Flyte platform limits.
 RESOURCE_QUOTA_KIND_REQUESTS_CPU = _env_str("TRAIN_RESOURCE_QUOTA_KIND_REQUESTS_CPU", "8")
 RESOURCE_QUOTA_KIND_REQUESTS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_KIND_REQUESTS_MEMORY", "4Gi")
 RESOURCE_QUOTA_KIND_LIMITS_CPU = _env_str("TRAIN_RESOURCE_QUOTA_KIND_LIMITS_CPU", "16")
@@ -96,6 +97,13 @@ RESOURCE_QUOTA_EKS_LIMITS_MEMORY = _env_str("TRAIN_RESOURCE_QUOTA_EKS_LIMITS_MEM
 RESOURCE_QUOTA_EKS_PODS = _env_str("TRAIN_RESOURCE_QUOTA_EKS_PODS", "150")
 RESOURCE_QUOTA_EKS_PVC = _env_str("TRAIN_RESOURCE_QUOTA_EKS_PVC", "80")
 RESOURCE_QUOTA_EKS_SERVICES = _env_str("TRAIN_RESOURCE_QUOTA_EKS_SERVICES", "150")
+
+# Optional resource defaults for task decorators if those decorators are env-driven.
+# These values are safe for the current Flyte admission caps you observed.
+TRAIN_TASK_REQUESTS_CPU = _env_str("TRAIN_TASK_REQUESTS_CPU", "1")
+TRAIN_TASK_REQUESTS_MEMORY = _env_str("TRAIN_TASK_REQUESTS_MEMORY", "512Mi")
+TRAIN_TASK_LIMITS_CPU = _env_str("TRAIN_TASK_LIMITS_CPU", "2")
+TRAIN_TASK_LIMITS_MEMORY = _env_str("TRAIN_TASK_LIMITS_MEMORY", "1Gi")
 
 
 def log(msg: str) -> None:
@@ -285,7 +293,20 @@ def lint_sources() -> None:
     run_cmd(["ruff", "check", str(TRAIN_PACKAGE_ROOT)])
 
 
+def _export_resource_env_defaults() -> None:
+    """
+    Optional hook for task decorators that read resource values from env.
+    This does not override hardcoded decorators. It only sets sane defaults.
+    """
+    os.environ.setdefault("TRAIN_TASK_REQUESTS_CPU", TRAIN_TASK_REQUESTS_CPU)
+    os.environ.setdefault("TRAIN_TASK_REQUESTS_MEMORY", TRAIN_TASK_REQUESTS_MEMORY)
+    os.environ.setdefault("TRAIN_TASK_LIMITS_CPU", TRAIN_TASK_LIMITS_CPU)
+    os.environ.setdefault("TRAIN_TASK_LIMITS_MEMORY", TRAIN_TASK_LIMITS_MEMORY)
+
+
 def import_check() -> None:
+    _export_resource_env_defaults()
+
     mod = importlib.import_module(WORKFLOW_IMPORT_MODULE)
     if not hasattr(mod, "TRAIN_WORKFLOW_LP"):
         fatal(f"{WORKFLOW_IMPORT_MODULE} does not expose TRAIN_WORKFLOW_LP")
@@ -544,6 +565,10 @@ def pyflyte_register_supports_service_account() -> bool:
 def build_register_env() -> dict[str, str]:
     register_env = os.environ.copy()
     register_env["TRAIN_TASK_IMAGE"] = TRAIN_TASK_IMAGE
+    register_env["TRAIN_TASK_REQUESTS_CPU"] = TRAIN_TASK_REQUESTS_CPU
+    register_env["TRAIN_TASK_REQUESTS_MEMORY"] = TRAIN_TASK_REQUESTS_MEMORY
+    register_env["TRAIN_TASK_LIMITS_CPU"] = TRAIN_TASK_LIMITS_CPU
+    register_env["TRAIN_TASK_LIMITS_MEMORY"] = TRAIN_TASK_LIMITS_MEMORY
     existing_pythonpath = register_env.get("PYTHONPATH", "")
     register_env["PYTHONPATH"] = str(SRC_ROOT) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
     return register_env
@@ -597,6 +622,7 @@ def register_entities() -> str:
     log(f"Source file: {WORKFLOW_SOURCE_FILE}")
     log(f"Profile: {TRAIN_PROFILE} | Cluster: {K8S_CLUSTER} | Namespace: {TASK_NAMESPACE}")
     log(f"Task image: {TRAIN_TASK_IMAGE}")
+    log(f"Task resource defaults: requests={TRAIN_TASK_REQUESTS_CPU}/{TRAIN_TASK_REQUESTS_MEMORY} limits={TRAIN_TASK_LIMITS_CPU}/{TRAIN_TASK_LIMITS_MEMORY}")
     log(f"Registration version: {registration_version}")
 
     register_env = build_register_env()

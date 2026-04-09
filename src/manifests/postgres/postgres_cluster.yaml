@@ -9,8 +9,8 @@ spec:
   backup:
     retentionPolicy: 30d
     barmanObjectStore:
-      destinationPath: s3://e2e-mlops-data-681802563986/postgres_backups/
-      serverName: postgres-cluster-20260406225818
+      destinationPath: s3://e2e-mlops-data-681802563986/postgres_backups/local/
+      serverName: mlsecops
       s3Credentials:
         accessKeyId:
           name: aws-creds
@@ -26,12 +26,6 @@ spec:
     initdb:
       database: flyte_admin
       owner: app
-      postInitSQL:
-        - CREATE DATABASE datacatalog OWNER app;
-        - CREATE DATABASE mlflow OWNER app;
-        - CREATE DATABASE iceberg OWNER app;
-      postInitApplicationSQL:
-        - ALTER SCHEMA public OWNER TO app;
   storage:
     storageClass: default-storage-class
     size: 5Gi

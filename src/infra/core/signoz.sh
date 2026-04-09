@@ -1,22 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly NAMESPACE="${SIGNOZ_NAMESPACE:-signoz}"
-readonly HELM_RELEASE="${SIGNOZ_HELM_RELEASE:-signoz}"
-readonly HELM_REPO="signoz"
-readonly HELM_REPO_URL="https://charts.signoz.io"
-readonly HELM_CHART="signoz/signoz"
-readonly HELM_VERSION="${SIGNOZ_HELM_VERSION:-0.113.0}"
-readonly K8S_CLUSTER="${K8S_CLUSTER:-kind}"
-readonly MANIFESTS_DIR="${MANIFESTS_DIR:-src/manifests/signoz}"
 
-readonly JWT_SECRET="${SIGNOZ_JWT_SECRET:-}"
-readonly AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
-readonly AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
-readonly SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
-readonly CLICKHOUSE_USER="${CLICKHOUSE_USER:-signoz}"
-readonly CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-signozpass}"
-readonly CLICKHOUSE_PORT="${CLICKHOUSE_PORT:-9000}"
+
 
 log() { printf '[%s] [%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$K8S_CLUSTER" "$*" >&2; }
 fatal() { printf '[FATAL] [%s] %s\n' "$K8S_CLUSTER" "$*" >&2; exit 1; }
@@ -133,25 +119,6 @@ EOF
 render_helm_values() {
   log "Rendering Helm values to ${MANIFESTS_DIR}/values.yaml"
   
-  local local_dev_mode="false"
-  local storage_class="gp3"
-  local cluster_name="prod-eks"
-  local clickhouse_replicas=2
-  local zookeeper_replicas=3
-  local otel_replicas=3
-  local query_replicas=3
-  local frontend_replicas=2
-  
-  if [[ "${K8S_CLUSTER}" == "kind" ]]; then
-    local_dev_mode="true"
-    storage_class="local-path"
-    cluster_name="kind-local"
-    clickhouse_replicas=1
-    zookeeper_replicas=1
-    otel_replicas=1
-    query_replicas=1
-    frontend_replicas=1
-  fi
   
   cat > "${MANIFESTS_DIR}/values.yaml" <<EOF
 global:

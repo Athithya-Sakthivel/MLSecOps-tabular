@@ -1,7 +1,7 @@
 core:
 	kind delete cluster --name local-cluster || true && kind create cluster --name local-cluster && \
 	K8S_CLUSTER=kind bash src/infra/core/default_storage_class.sh && \
-	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh deploy 
+	K8S_CLUSTER=kind bash src/infra/core/postgres_cluster.sh deploy
 
 elt:
 	make core
@@ -15,6 +15,7 @@ prune-elt:
 	bash src/infra/elt/spark_operator.sh --cleanup
 	
 train:
+	bash src/infra/elt/iceberg.sh --rollout && \
 	python3 src/infra/train/mlflow_server.py --rollout && bash src/workflows/train/commands.sh
 
 prune-train:
@@ -24,7 +25,7 @@ set-sa:
 	bash src/core/default_storage_class.sh
 
 tree:
-	tree -a -I '.git|.venv|.repos|__pycache__|venv'
+	tree -a -I '.git|.venv|archive|__pycache__|.venv_deploy|.venv_elt|.venv_train|.ruff_cache'
 
 push:
 	git add .
@@ -94,3 +95,7 @@ cloudflare-logout:
 	unset CLOUDFLARE_TUNNEL_CREDENTIALS_B64 && \
 	unset CLOUDFLARE_TUNNEL_NAME
 
+
+
+
+ 

@@ -61,7 +61,7 @@ MLFLOW_SERVER_ENABLE_JOB_EXECUTION = os.environ.get(
 
 MLFLOW_DB_AUTO_MIGRATE_ON_START = os.environ.get(
     "MLFLOW_DB_AUTO_MIGRATE_ON_START",
-    "true",
+    "false",
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 MLFLOW_DB_MIGRATE_TIMEOUT_SECONDS = int(os.environ.get("MLFLOW_DB_MIGRATE_TIMEOUT_SECONDS", "900"))
