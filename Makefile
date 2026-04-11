@@ -11,14 +11,6 @@ pg:
 pg-backup:
 	MODE=backup src/manifests/postgres/backup_and_restore_commands.sh
 
-pg-restore-latest:
-	MODE=restore src/manifests/postgres/backup_and_restore_commands.sh
-	
-pg-restore-time:
-	@test -n "$$TARGET_TIME" || (echo "ERROR: TARGET_TIME must be set (RFC3339)" && exit 1)
-	MODE=restore-time TARGET_TIME=$$TARGET_TIME src/manifests/postgres/backup_and_restore_commands.sh
-
-
 elt:
 	bash src/infra/elt/iceberg.sh --rollout && bash src/infra/elt/spark_operator.sh --rollout && \
 	python3 src/infra/core/flyte_setup.py --rollout && bash src/workflows/ELT/run.sh && echo "sleep 1800" && sleep 1800 && kubectl get pods -A
@@ -31,7 +23,15 @@ train:
 	python3 src/infra/train/mlflow_server.py --rollout && bash src/workflows/train/commands.sh
 
 prune-train:
-	python3 src/infra/train/mlflow_server.py --delete
+	python3 src/infra/train/mlflow_server.py --delete && python3 src/infra/core/flyte_setup.py --delete
+
+
+pg-restore-latest:
+	MODE=restore src/manifests/postgres/backup_and_restore_commands.sh
+	
+pg-restore-time:
+	@test -n "$$TARGET_TIME" || (echo "ERROR: TARGET_TIME must be set (RFC3339)" && exit 1)
+	MODE=restore-time TARGET_TIME=$$TARGET_TIME src/manifests/postgres/backup_and_restore_commands.sh
 
 
 tree:

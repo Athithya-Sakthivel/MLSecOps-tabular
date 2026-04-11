@@ -7,7 +7,7 @@ import math
 import os
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import date
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def log_step(step_name: str) -> Iterator[None]:
+def log_step(step_name: str):
     started = time.perf_counter()
     logger.info("%s started", step_name)
     try:

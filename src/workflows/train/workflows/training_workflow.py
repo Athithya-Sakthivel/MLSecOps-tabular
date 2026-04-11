@@ -15,13 +15,6 @@ def train(
     mlflow_experiment_name: str = "trip_eta_lgbm",
     max_eval_rows: int = 100_000,
 ) -> str:
-    """
-    Orchestrates training, evaluation, and registration.
-
-    The train task returns a JSON string. The evaluation task consumes that JSON
-    string directly, which keeps the Flyte boundary simple and avoids schema
-    extraction issues from nested dynamic types.
-    """
     training_result_json = train_model_task(
         train_num_threads=train_num_threads,
         tuning_sample_rows=tuning_sample_rows,

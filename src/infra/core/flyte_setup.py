@@ -90,7 +90,7 @@ FLYTE_ATOMIC = os.environ.get("FLYTE_ATOMIC", "false").lower() in {"1", "true", 
 
 DELETE_TARGET_NAMESPACE = os.environ.get("DELETE_TARGET_NAMESPACE", "true").lower() in {"1", "true", "yes", "y", "on"}
 DELETE_TASK_NAMESPACES = os.environ.get("DELETE_TASK_NAMESPACES", "false").lower() in {"1", "true", "yes", "y", "on"}
-DELETE_FLYTE_CRDS = os.environ.get("DELETE_FLYTE_CRDS", "false").lower() in {"1", "true", "yes", "y", "on"}
+DELETE_FLYTE_CRDS = os.environ.get("DELETE_FLYTE_CRDS", "true").lower() in {"1", "true", "yes", "y", "on"}
 
 APP_DB_USER = ""
 APP_DB_PASSWORD = ""
