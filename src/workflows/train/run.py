@@ -55,11 +55,11 @@ if TRAIN_PROFILE not in {"staging", "prod"}:
 
 TRAIN_SERVICE_ACCOUNT = _env_str("TRAIN_SERVICE_ACCOUNT", "ray") or "ray"
 
-TRAIN_TASK_IMAGE = os.environ.get("TRAIN_TASK_IMAGE")
+TRAIN_TASK_IMAGE = _env_str("TRAIN_TASK_IMAGE")
 if not TRAIN_TASK_IMAGE:
     raise RuntimeError("TRAIN_TASK_IMAGE environment variable must be set and non-empty")
 
-WORKFLOW_SOURCE_FILE = SRC_ROOT / "workflows" / "train" / "launch_plans.py"
+WORKFLOW_SOURCE_FILE = TRAIN_PACKAGE_ROOT / "launch_plans.py"
 WORKFLOW_SOURCE_REL = WORKFLOW_SOURCE_FILE.relative_to(SRC_ROOT)
 WORKFLOW_IMPORT_MODULE = _env_str("WORKFLOW_IMPORT_MODULE", "workflows.train.launch_plans")
 
@@ -96,10 +96,10 @@ RESOURCE_QUOTA_EKS_PODS = _env_str("TRAIN_RESOURCE_QUOTA_EKS_PODS", "150")
 RESOURCE_QUOTA_EKS_PVC = _env_str("TRAIN_RESOURCE_QUOTA_EKS_PVC", "80")
 RESOURCE_QUOTA_EKS_SERVICES = _env_str("TRAIN_RESOURCE_QUOTA_EKS_SERVICES", "150")
 
-TRAIN_TASK_REQUESTS_CPU = _env_str("TRAIN_TASK_REQUESTS_CPU", "1")
-TRAIN_TASK_REQUESTS_MEMORY = _env_str("TRAIN_TASK_REQUESTS_MEMORY", "512Mi")
-TRAIN_TASK_LIMITS_CPU = _env_str("TRAIN_TASK_LIMITS_CPU", "2")
-TRAIN_TASK_LIMITS_MEMORY = _env_str("TRAIN_TASK_LIMITS_MEMORY", "1Gi")
+TRAIN_TASK_REQUESTS_CPU = _env_str("TRAIN_TASK_REQUESTS_CPU", "2")
+TRAIN_TASK_REQUESTS_MEMORY = _env_str("TRAIN_TASK_REQUESTS_MEMORY", "3Gi")
+TRAIN_TASK_LIMITS_CPU = _env_str("TRAIN_TASK_LIMITS_CPU", "3")
+TRAIN_TASK_LIMITS_MEMORY = _env_str("TRAIN_TASK_LIMITS_MEMORY", "3Gi")
 TRAIN_DEFAULT_NUM_THREADS = _env_str("TRAIN_DEFAULT_NUM_THREADS", "2")
 
 
@@ -280,6 +280,28 @@ def init_flytectl() -> None:
     )
 
 
+def _quota_values() -> dict[str, str]:
+    if K8S_CLUSTER == "kind":
+        return {
+            "requests_cpu": RESOURCE_QUOTA_KIND_REQUESTS_CPU,
+            "requests_memory": RESOURCE_QUOTA_KIND_REQUESTS_MEMORY,
+            "limits_cpu": RESOURCE_QUOTA_KIND_LIMITS_CPU,
+            "limits_memory": RESOURCE_QUOTA_KIND_LIMITS_MEMORY,
+            "pods": RESOURCE_QUOTA_KIND_PODS,
+            "persistentvolumeclaims": RESOURCE_QUOTA_KIND_PVC,
+            "services": RESOURCE_QUOTA_KIND_SERVICES,
+        }
+    return {
+        "requests_cpu": RESOURCE_QUOTA_EKS_REQUESTS_CPU,
+        "requests_memory": RESOURCE_QUOTA_EKS_REQUESTS_MEMORY,
+        "limits_cpu": RESOURCE_QUOTA_EKS_LIMITS_CPU,
+        "limits_memory": RESOURCE_QUOTA_EKS_LIMITS_MEMORY,
+        "pods": RESOURCE_QUOTA_EKS_PODS,
+        "persistentvolumeclaims": RESOURCE_QUOTA_EKS_PVC,
+        "services": RESOURCE_QUOTA_EKS_SERVICES,
+    }
+
+
 def _bootstrap_manifest() -> str:
     q = _quota_values()
     return f"""apiVersion: v1
@@ -341,28 +363,6 @@ spec:
     persistentvolumeclaims: "{q['persistentvolumeclaims']}"
     services: "{q['services']}"
 """
-
-
-def _quota_values() -> dict[str, str]:
-    if K8S_CLUSTER == "kind":
-        return {
-            "requests_cpu": RESOURCE_QUOTA_KIND_REQUESTS_CPU,
-            "requests_memory": RESOURCE_QUOTA_KIND_REQUESTS_MEMORY,
-            "limits_cpu": RESOURCE_QUOTA_KIND_LIMITS_CPU,
-            "limits_memory": RESOURCE_QUOTA_KIND_LIMITS_MEMORY,
-            "pods": RESOURCE_QUOTA_KIND_PODS,
-            "persistentvolumeclaims": RESOURCE_QUOTA_KIND_PVC,
-            "services": RESOURCE_QUOTA_KIND_SERVICES,
-        }
-    return {
-        "requests_cpu": RESOURCE_QUOTA_EKS_REQUESTS_CPU,
-        "requests_memory": RESOURCE_QUOTA_EKS_REQUESTS_MEMORY,
-        "limits_cpu": RESOURCE_QUOTA_EKS_LIMITS_CPU,
-        "limits_memory": RESOURCE_QUOTA_EKS_LIMITS_MEMORY,
-        "pods": RESOURCE_QUOTA_EKS_PODS,
-        "persistentvolumeclaims": RESOURCE_QUOTA_EKS_PVC,
-        "services": RESOURCE_QUOTA_EKS_SERVICES,
-    }
 
 
 def bootstrap_manifest_quota_line() -> str:
@@ -509,13 +509,13 @@ def resolve_train_launchplan_name() -> str:
 
 def registration_tree_files() -> list[Path]:
     files: list[Path] = []
-    for path in sorted((SRC_ROOT / "workflows" / "train").rglob("*.py")):
+    for path in sorted(TRAIN_PACKAGE_ROOT.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
         files.append(path)
     for extra in (
-        SRC_ROOT / "workflows" / "train" / "requirements.txt",
-        SRC_ROOT / "workflows" / "train" / "Dockerfile.task_image",
+        TRAIN_PACKAGE_ROOT / "requirements.txt",
+        TRAIN_PACKAGE_ROOT / "Dockerfile.task_image",
     ):
         if extra.is_file():
             files.append(extra)

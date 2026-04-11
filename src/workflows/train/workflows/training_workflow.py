@@ -1,4 +1,3 @@
-# src/workflows/train/workflows/training_workflow.py
 from __future__ import annotations
 
 from flytekit import workflow
