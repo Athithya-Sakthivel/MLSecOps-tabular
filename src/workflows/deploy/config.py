@@ -139,7 +139,7 @@ def _env_tuple(name: str, default: tuple[str, ...], sep: str = ",") -> tuple[str
 
 def _env_otlp_timeout_seconds() -> float:
     """
-    OpenTelemetry exports commonly use OTEL_EXPORTER_OTLP_TIMEOUT in milliseconds.
+    OpenTelemetry exporters commonly use OTEL_EXPORTER_OTLP_TIMEOUT in milliseconds.
     Keep OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS as a fallback for older deployments.
     """
     raw_ms = os.getenv("OTEL_EXPORTER_OTLP_TIMEOUT")
@@ -327,7 +327,9 @@ def get_settings() -> Settings:
 
     model_uri = _env_str("MODEL_URI")
     if not model_uri:
-        raise RuntimeError("MODEL_URI is required and should point to a bundle root or a model file")
+        raise RuntimeError(
+            "MODEL_URI is required and should point to a bundle root or a model file"
+        )
 
     model_output_names = _env_tuple("MODEL_OUTPUT_NAMES", tuple())
     model_input_name = _env_str("MODEL_INPUT_NAME") or None

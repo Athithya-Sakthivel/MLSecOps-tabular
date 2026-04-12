@@ -28,12 +28,13 @@ SETTINGS = get_settings()
 BACKEND_DEPLOYMENT_NAME = f"{SETTINGS.serve_deployment_name}_backend"
 INGRESS_DEPLOYMENT_NAME = SETTINGS.serve_deployment_name
 
-# The backend needs CPU for ONNX execution. The ingress is an HTTP shim and
-# should not consume scarce CPU on a tiny cluster.
-BACKEND_NUM_CPUS = float(SETTINGS.replica_num_cpus)
+# Keep the HTTP shim lightweight and keep all heavy work on the backend replica.
 INGRESS_NUM_CPUS = 0.0
+BACKEND_NUM_CPUS = float(SETTINGS.replica_num_cpus)
 
+# Let the HTTP shim absorb bursts without blocking the model replica.
 INGRESS_MAX_ONGOING_REQUESTS = max(SETTINGS.max_ongoing_requests, 32)
+# Keep the model replica able to batch while avoiding unbounded queue growth.
 BACKEND_MAX_ONGOING_REQUESTS = max(SETTINGS.max_ongoing_requests, SETTINGS.batch_max_size)
 
 REQUEST_ID_HEADER = "X-Request-Id"
@@ -140,11 +141,7 @@ def _log_exception(logger_obj: logging.Logger, event: str, **fields: Any) -> Non
     logger_obj.exception(event, extra={**BASE_LOG_FIELDS, **fields})
 
 
-def _json_response(
-    payload: Any,
-    status_code: int,
-    request_id: str | None = None,
-) -> JSONResponse:
+def _json_response(payload: Any, status_code: int, request_id: str | None = None) -> JSONResponse:
     headers = {REQUEST_ID_HEADER: request_id} if request_id else None
     return JSONResponse(payload, status_code=status_code, headers=headers)
 
@@ -224,7 +221,7 @@ class InferenceBackend:
             ort_providers=list(self.ort_providers),
         )
 
-    async def check_health(self) -> None:
+    def check_health(self) -> None:
         if self.session is None:
             raise RuntimeError("model session is not initialized")
         if not self.input_name:
@@ -235,7 +232,7 @@ class InferenceBackend:
             raise RuntimeError("feature order is missing")
 
     async def ready_summary(self) -> dict[str, Any]:
-        await self.check_health()
+        self.check_health()
         return {
             "status": "ok",
             "service_name": self.settings.service_name,
@@ -368,6 +365,7 @@ class TabularInferenceApp:
         self.tracer = trace.get_tracer("tabular-inference-http")
         self.meter = metrics.get_meter("tabular-inference-http")
         self._telemetry = initialize_telemetry(self.settings)
+        self._backend_info_cache: dict[str, Any] | None = None
 
         self.http_request_counter = self.meter.create_counter(
             name="http.server.request_count",
@@ -390,15 +388,20 @@ class TabularInferenceApp:
             unit="1",
         )
 
-    async def _get_backend_info(self) -> dict[str, Any]:
+    async def _get_backend_info(self, refresh: bool = False) -> dict[str, Any]:
+        if self._backend_info_cache is not None and not refresh:
+            return self._backend_info_cache
+
         raw = await self.backend.ready_summary.remote()
         if not isinstance(raw, dict):
             raise RuntimeError("backend ready_summary returned an invalid payload")
+
+        self._backend_info_cache = raw
         return raw
 
     async def _handle_ready(self, request_id: str) -> JSONResponse:
         try:
-            info = await self._get_backend_info()
+            info = await self._get_backend_info(refresh=True)
         except Exception as exc:
             return _json_response(
                 {"detail": f"Backend unavailable: {exc}"},
@@ -446,7 +449,7 @@ class TabularInferenceApp:
                 )
 
             try:
-                backend_info = await self._get_backend_info()
+                backend_info = await self._get_backend_info(refresh=False)
             except Exception as exc:
                 return _json_response(
                     {"detail": f"Backend unavailable: {exc}"},
@@ -481,11 +484,7 @@ class TabularInferenceApp:
                     model_version=backend_info["model_version"],
                     error_type=exc.__class__.__name__,
                 )
-                return _json_response(
-                    {"detail": "Inference failed"},
-                    500,
-                    request_id=request_id,
-                )
+                return _json_response({"detail": "Inference failed"}, 500, request_id=request_id)
 
             total_ms = (time.perf_counter() - request_start) * 1000.0
             if total_ms >= self.settings.slow_request_ms:
@@ -513,16 +512,14 @@ class TabularInferenceApp:
             )
 
         except ValueError as exc:
-            backend_info = None
+            backend_info: dict[str, Any] | None = None
             try:
-                backend_info = await self._get_backend_info()
+                backend_info = await self._get_backend_info(refresh=False)
             except Exception:
                 backend_info = None
 
             model_name = backend_info["model_name"] if backend_info else "model"
-            model_version = (
-                backend_info["model_version"] if backend_info else self.settings.model_version
-            )
+            model_version = backend_info["model_version"] if backend_info else self.settings.model_version
 
             _log(
                 self.logger,
@@ -535,11 +532,7 @@ class TabularInferenceApp:
                 error_type="validation_error",
                 error_message=str(exc),
             )
-            return _json_response(
-                {"detail": str(exc)},
-                422,
-                request_id=request_id,
-            )
+            return _json_response({"detail": str(exc)}, 422, request_id=request_id)
 
         except Exception as exc:
             _log_exception(
@@ -549,11 +542,7 @@ class TabularInferenceApp:
                 request_id=request_id,
                 error_type=exc.__class__.__name__,
             )
-            return _json_response(
-                {"detail": "Inference failed"},
-                500,
-                request_id=request_id,
-            )
+            return _json_response({"detail": "Inference failed"}, 500, request_id=request_id)
 
     async def __call__(self, request: Request) -> JSONResponse:
         path = _route_key(request.url.path)
@@ -588,11 +577,7 @@ class TabularInferenceApp:
                 elif method == "POST" and path in {"/", "/predict"}:
                     response = await self._handle_predict(request, request_id, request_start)
                 else:
-                    response = _json_response(
-                        {"detail": "Not found"},
-                        404,
-                        request_id=request_id,
-                    )
+                    response = _json_response({"detail": "Not found"}, 404, request_id=request_id)
 
                 status_code = response.status_code
                 span.set_attribute("http.status_code", status_code)
@@ -615,11 +600,7 @@ class TabularInferenceApp:
                     request_id=request_id,
                     error_type=exc.__class__.__name__,
                 )
-                return _json_response(
-                    {"detail": "Internal server error"},
-                    500,
-                    request_id=request_id,
-                )
+                return _json_response({"detail": "Internal server error"}, 500, request_id=request_id)
 
             finally:
                 elapsed_ms = (time.perf_counter() - request_start) * 1000.0
@@ -660,8 +641,7 @@ class InferenceBackendDeployment(InferenceBackend):
 
 @serve.deployment(
     name=INGRESS_DEPLOYMENT_NAME,
-    num_replicas="auto",
-    autoscaling_config=_autoscaling_config(),
+    num_replicas=1,
     ray_actor_options={"num_cpus": INGRESS_NUM_CPUS},
     max_ongoing_requests=INGRESS_MAX_ONGOING_REQUESTS,
     health_check_period_s=SETTINGS.serve_health_check_period_s,

@@ -61,5 +61,26 @@ kubectl get pods -A
 
 python3 src/infra/deploy/inference_service.py --delete
 
+H=$(kubectl get pod -n inference -l ray.io/node-type=head -o jsonpath='{.items[0].metadata.name}')
+HEAD_SVC=$(kubectl get svc -n inference -o name | grep 'head-svc$' | head -n1 | cut -d/ -f2)
+
+kubectl get rayservice -n inference tabular-inference -o yaml | sed -n '/^status:/,$p' | head -n 220
+
+kubectl exec -n inference "$H" -c ray-head -- bash -lc '
+echo "=== ray status ==="
+ray status | sed -n "/Cluster status:/,/Autoscaler status:/p" | head -n 220
+echo
+echo "=== ray summary actors ==="
+ray summary actors | sed -n "1,180p"
+'
+
+kubectl port-forward -n inference "svc/$HEAD_SVC" 8265:8265 >/tmp/raypf.log 2>&1 &
+PF=$!
+sleep 4
+curl -sS http://127.0.0.1:8265/api/serve/applications/ | sed -n '1,260p'
+curl -sS http://127.0.0.1:8265/-/routes | sed -n '1,120p'
+kill "$PF"
 
 kubectl port-forward -n inference svc/tabular-inference-t9m5h-head-svc 8000:8000
+
+

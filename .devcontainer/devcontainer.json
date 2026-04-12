@@ -1,5 +1,5 @@
 {
-  "name": "MLSecOps-batch",
+  "name": "MLSecOps-tabular",
   "build": {
     "dockerfile": "Dockerfile",
     "context": "."

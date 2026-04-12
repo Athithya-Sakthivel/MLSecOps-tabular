@@ -1,650 +1,736 @@
 from __future__ import annotations
 
-import asyncio
+import argparse
+import base64
+import hashlib
 import json
-import logging
+import os
+import subprocess
 import sys
-import time
-import uuid
-from datetime import UTC, datetime
-from json import JSONDecodeError
-from typing import Any, ClassVar
+import textwrap
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-import numpy as np
-from config import get_settings
-from model_store import LoadedModel, load_loaded_model
-from opentelemetry import metrics, trace
-from opentelemetry.propagate import extract
-from opentelemetry.trace import SpanKind, Status, StatusCode
-from ray import serve
-from ray.serve.handle import DeploymentHandle
-from schemas import build_feature_matrix, coerce_instances, split_model_outputs
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-from telemetry import initialize_telemetry
+import yaml
 
-SETTINGS = get_settings()
+MANIFEST_DIR = Path("src/manifests/kuberay_rayservice")
+STATE_DIR = MANIFEST_DIR / ".state"
+RENDERED_PATH = STATE_DIR / "rendered.yaml"
+HASH_PATH = STATE_DIR / "rendered.sha256"
 
-BACKEND_DEPLOYMENT_NAME = f"{SETTINGS.serve_deployment_name}_backend"
-INGRESS_MAX_ONGOING_REQUESTS = max(SETTINGS.max_ongoing_requests, 32)
-BACKEND_MAX_ONGOING_REQUESTS = max(SETTINGS.max_ongoing_requests, SETTINGS.batch_max_size)
+MANIFEST_REVISION_ANNOTATION = "inference-service.io/revision"
+AUTH_MODE_ANNOTATION = "inference-service.io/auth-mode"
 
-# The ingress is intentionally zero-CPU so the app can schedule on a tiny cluster
-# even when the backend replica consumes the only worker CPU.
-INGRESS_NUM_CPUS = 0.0
-BACKEND_NUM_CPUS = SETTINGS.replica_num_cpus
+DEPLOYMENT_DEFAULTS = {
+    "NAMESPACE": "inference",
+    "RAYSERVICE_NAME": "tabular-inference",
+    "SERVICE_ACCOUNT_NAME": "ray-inference-sa",
+    "AWS_SECRET_NAME": "aws-credentials",
+    "RAY_IMAGE": "ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-13-04-17--4f51ecd@sha256:230fdf88cdcebf1063d5002346f54b158f30b1147196d62db409313a103a67a4",
+    "RAY_VERSION": "2.54.1",
+    "HEAD_CPU": "1",
+    "HEAD_MEMORY": "3Gi",
+    "WORKER_CPU": "1",
+    "WORKER_MEMORY": "1536Mi",
+    "WORKER_REPLICAS": "1",
+    "WORKER_MAX_REPLICAS": "1",
+    "WORKER_RAY_NUM_CPUS": "1",
+    "HEAD_RAY_NUM_CPUS": "0",
+    "MODEL_CACHE_VOLUME": "/mlsecops",
+    "MODEL_CACHE_DIR": "/mlsecops/model-cache",
+    "RUN_AS_USER": "1000",
+    "RUN_AS_GROUP": "1000",
+    "FS_GROUP": "1000",
+}
 
-logger = logging.getLogger("tabular-inference")
-BASE_LOG_FIELDS: dict[str, Any] = {
-    "service_name": SETTINGS.service_name,
-    "service_version": SETTINGS.service_version,
-    "deployment": SETTINGS.serve_deployment_name,
-    "model_uri": SETTINGS.model_uri,
+APP_ENV_DEFAULTS = {
+    "DEPLOYMENT_PROFILE": "prod",
+    "OTEL_SERVICE_NAME": "tabular-inference",
+    "SERVICE_VERSION": "v1",
+    "DEPLOYMENT_ENVIRONMENT": "prod",
+    "K8S_CLUSTER_NAME": "production-cluster",
+    "MODEL_URI": "__REQUIRED_MODEL_URI__",
+    "MODEL_VERSION": "__REQUIRED_MODEL_VERSION__",
+    "MODEL_SHA256": "__REQUIRED_MODEL_SHA256__",
+    "MODEL_INPUT_NAME": "__REQUIRED_MODEL_INPUT_NAME__",
+    "MODEL_OUTPUT_NAMES": "__REQUIRED_MODEL_OUTPUT_NAMES__",
+    "FEATURE_ORDER": "__REQUIRED_FEATURE_ORDER__",
+    "ALLOW_EXTRA_FEATURES": "false",
+    "MODEL_CACHE_DIR": "/mlsecops/model-cache",
+    "MAX_INSTANCES_PER_REQUEST": "256",
+    "SERVE_DEPLOYMENT_NAME": "tabular_inference",
+    "SERVE_NUM_CPUS": "0.5",
+    "SERVE_MIN_REPLICAS": "1",
+    "SERVE_INITIAL_REPLICAS": "1",
+    "SERVE_MAX_REPLICAS": "1",
+    "SERVE_TARGET_ONGOING_REQUESTS": "1",
+    "SERVE_MAX_ONGOING_REQUESTS": "2",
+    "SERVE_UPSCALE_DELAY_S": "3.0",
+    "SERVE_DOWNSCALE_DELAY_S": "60.0",
+    "SERVE_BATCH_MAX_SIZE": "16",
+    "SERVE_BATCH_WAIT_TIMEOUT_S": "0.005",
+    "SERVE_HEALTH_CHECK_PERIOD_S": "10.0",
+    "SERVE_HEALTH_CHECK_TIMEOUT_S": "30.0",
+    "SERVE_GRACEFUL_SHUTDOWN_WAIT_LOOP_S": "2.0",
+    "SERVE_GRACEFUL_SHUTDOWN_TIMEOUT_S": "20.0",
+    "ORT_INTRA_OP_NUM_THREADS": "1",
+    "ORT_INTER_OP_NUM_THREADS": "1",
+    "ORT_LOG_SEVERITY_LEVEL": "3",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://signoz-otel-collector.signoz.svc.cluster.local:4317",
+    "OTEL_EXPORTER_OTLP_TIMEOUT": "10000",
+    "OTEL_METRIC_EXPORT_INTERVAL_MS": "15000",
+    "OTEL_METRIC_EXPORT_TIMEOUT_MS": "10000",
+    "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+    "OTEL_TRACES_SAMPLER_ARG": "0.10",
+    "LOG_LEVEL": "WARNING",
+    "SLOW_REQUEST_MS": "500.0",
+    "AWS_ACCESS_KEY_ID": "",
+    "AWS_SECRET_ACCESS_KEY": "",
+    "USE_IAM": "false",
+}
+
+APP_ENV_ORDER = list(APP_ENV_DEFAULTS.keys())
+REQUIRED_APP_ENV_NAMES = {
+    "RAY_IMAGE",
+    "MODEL_URI",
+    "MODEL_VERSION",
+    "MODEL_SHA256",
+    "MODEL_INPUT_NAME",
+    "MODEL_OUTPUT_NAMES",
+    "FEATURE_ORDER",
+}
+
+PLACEHOLDER_VALUES = {
+    "RAY_IMAGE": DEPLOYMENT_DEFAULTS["RAY_IMAGE"],
+    "MODEL_URI": APP_ENV_DEFAULTS["MODEL_URI"],
+    "MODEL_VERSION": APP_ENV_DEFAULTS["MODEL_VERSION"],
+    "MODEL_SHA256": APP_ENV_DEFAULTS["MODEL_SHA256"],
+    "MODEL_INPUT_NAME": APP_ENV_DEFAULTS["MODEL_INPUT_NAME"],
+    "MODEL_OUTPUT_NAMES": APP_ENV_DEFAULTS["MODEL_OUTPUT_NAMES"],
+    "FEATURE_ORDER": APP_ENV_DEFAULTS["FEATURE_ORDER"],
 }
 
 
-class JsonFormatter(logging.Formatter):
-    _standard_attrs: ClassVar[set[str]] = {
-        "name",
-        "msg",
-        "args",
-        "levelname",
-        "levelno",
-        "pathname",
-        "filename",
-        "module",
-        "exc_info",
-        "exc_text",
-        "stack_info",
-        "lineno",
-        "funcName",
-        "created",
-        "msecs",
-        "relativeCreated",
-        "thread",
-        "threadName",
-        "processName",
-        "process",
-        "taskName",
-    }
+@dataclass(frozen=True, slots=True)
+class DeploymentSettings:
+    namespace: str
+    rayservice_name: str
+    service_account_name: str
+    aws_secret_name: str
+    ray_image: str
+    ray_version: str
+    head_cpu: str
+    head_memory: str
+    worker_cpu: str
+    worker_memory: str
+    worker_replicas: int
+    worker_max_replicas: int
+    worker_ray_num_cpus: str
+    head_ray_num_cpus: str
+    model_cache_volume: str
+    model_cache_dir: str
+    run_as_user: int
+    run_as_group: int
+    fs_group: int
+    use_iam: bool
+    irsa_role_arn: str | None
 
-    def format(self, record: logging.LogRecord) -> str:
-        payload: dict[str, Any] = {
-            "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
+    def __post_init__(self) -> None:
+        if not self.namespace.strip():
+            raise RuntimeError("NAMESPACE must not be empty")
+        if not self.rayservice_name.strip():
+            raise RuntimeError("RAYSERVICE_NAME must not be empty")
+        if not self.aws_secret_name.strip():
+            raise RuntimeError("AWS_SECRET_NAME must not be empty")
+        if not self.ray_image.strip():
+            raise RuntimeError("RAY_IMAGE must not be empty")
+        if not self.ray_version.strip():
+            raise RuntimeError("RAY_VERSION must not be empty")
+        if not self.head_cpu.strip():
+            raise RuntimeError("HEAD_CPU must not be empty")
+        if not self.head_memory.strip():
+            raise RuntimeError("HEAD_MEMORY must not be empty")
+        if not self.worker_cpu.strip():
+            raise RuntimeError("WORKER_CPU must not be empty")
+        if not self.worker_memory.strip():
+            raise RuntimeError("WORKER_MEMORY must not be empty")
+        if not self.worker_ray_num_cpus.strip():
+            raise RuntimeError("WORKER_RAY_NUM_CPUS must not be empty")
+        if not self.head_ray_num_cpus.strip():
+            raise RuntimeError("HEAD_RAY_NUM_CPUS must not be empty")
+        if not self.model_cache_volume.strip():
+            raise RuntimeError("MODEL_CACHE_VOLUME must not be empty")
+        if not self.model_cache_dir.strip():
+            raise RuntimeError("MODEL_CACHE_DIR must not be empty")
 
-        for key, value in record.__dict__.items():
-            if key in self._standard_attrs or key.startswith("_"):
-                continue
-            if value is None:
-                continue
-            payload[key] = value
+        if self.worker_replicas < 1:
+            raise RuntimeError("WORKER_REPLICAS must be >= 1")
+        if self.worker_max_replicas < self.worker_replicas:
+            raise RuntimeError("WORKER_MAX_REPLICAS must be >= WORKER_REPLICAS")
 
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
-
-        return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-def _resolve_log_level(level_name: str) -> int:
-    level = level_name.strip().upper()
-    mapping = {
-        "CRITICAL": logging.CRITICAL,
-        "ERROR": logging.ERROR,
-        "WARNING": logging.WARNING,
-        "WARN": logging.WARNING,
-        "INFO": logging.INFO,
-        "DEBUG": logging.DEBUG,
-    }
-    return mapping.get(level, logging.INFO)
-
-
-def configure_logging() -> None:
-    root = logging.getLogger()
-    root.setLevel(_resolve_log_level(SETTINGS.log_level))
-
-    formatter = JsonFormatter()
-    if not root.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(formatter)
-        root.addHandler(handler)
-    else:
-        for handler in root.handlers:
-            try:
-                handler.setFormatter(formatter)
-            except Exception:
-                continue
-
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+        if self.run_as_user < 1:
+            raise RuntimeError("RUN_AS_USER must be >= 1")
+        if self.run_as_group < 1:
+            raise RuntimeError("RUN_AS_GROUP must be >= 1")
+        if self.fs_group < 1:
+            raise RuntimeError("FS_GROUP must be >= 1")
 
 
-configure_logging()
+def _env_str(name: str, default: str) -> str:
+    return os.getenv(name, default).strip()
 
 
-def _log(logger_obj: logging.Logger, level: int, event: str, **fields: Any) -> None:
-    logger_obj.log(level, event, extra={**BASE_LOG_FIELDS, **fields})
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
 
 
-def _log_exception(logger_obj: logging.Logger, event: str, **fields: Any) -> None:
-    logger_obj.exception(event, extra={**BASE_LOG_FIELDS, **fields})
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _json_response(detail: str, status_code: int) -> JSONResponse:
-    return JSONResponse({"detail": detail}, status_code=status_code)
+def _require_nonempty(value: str | None, message: str) -> str:
+    if value is None or not value.strip():
+        raise RuntimeError(message)
+    return value.strip()
 
 
-def _route_key(path: str) -> str:
-    cleaned = path.rstrip("/")
-    return cleaned if cleaned else "/"
+def _validate_log_level(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized == "WARN":
+        normalized = "WARNING"
+
+    allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+    if not normalized:
+        return "WARNING"
+    if normalized not in allowed:
+        raise RuntimeError(f"LOG_LEVEL must be one of {sorted(allowed)}, got {value!r}")
+    return normalized
 
 
-def _is_ready_request(path: str, method: str) -> bool:
-    return method in {"GET", "HEAD"} and path in {"/", "/readyz"}
+def _profile() -> str:
+    raw = os.getenv("DEPLOYMENT_PROFILE", "prod").strip().lower()
+    if raw != "prod":
+        raise RuntimeError("DEPLOYMENT_PROFILE is fixed to 'prod' in this build")
+    return "prod"
 
 
-def _is_predict_request(path: str, method: str) -> bool:
-    return method == "POST" and path in {"/", "/predict"}
+def _validate_auth_mode() -> tuple[bool, str | None]:
+    use_iam = _env_bool("USE_IAM", False)
+    access_key = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
 
-
-def _autoscaling_config() -> dict[str, Any]:
-    return {
-        "min_replicas": SETTINGS.min_replicas,
-        "initial_replicas": SETTINGS.initial_replicas,
-        "max_replicas": SETTINGS.max_replicas,
-        "target_ongoing_requests": SETTINGS.target_ongoing_requests,
-        "upscale_delay_s": SETTINGS.upscale_delay_s,
-        "downscale_delay_s": SETTINGS.downscale_delay_s,
-    }
-
-
-class InferenceBackend:
-    def __init__(self) -> None:
-        self.settings = SETTINGS
-        self.logger = logging.getLogger("tabular-inference.backend")
-        self.tracer = trace.get_tracer("tabular-inference-backend")
-        self.meter = metrics.get_meter("tabular-inference-backend")
-        self._telemetry = initialize_telemetry(self.settings)
-
-        self.inference_request_counter = self.meter.create_counter(
-            name="inference.requests",
-            description="Total inference requests",
-            unit="1",
+    if use_iam:
+        if access_key or secret_key:
+            raise RuntimeError(
+                "Do not mix USE_IAM=true with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+            )
+        role_arn = _require_nonempty(
+            os.getenv("KUBERAY_IAM_ROLE_ARN"),
+            "KUBERAY_IAM_ROLE_ARN is required when USE_IAM=true",
         )
-        self.inference_error_counter = self.meter.create_counter(
-            name="inference.errors",
-            description="Total inference failures",
-            unit="1",
-        )
-        self.inference_duration_histogram = self.meter.create_histogram(
-            name="inference.duration",
-            description="Model execution latency",
-            unit="ms",
-        )
-        self.inference_batch_size_histogram = self.meter.create_histogram(
-            name="inference.batch_size",
-            description="Number of instances per inference request",
-            unit="1",
+        return True, role_arn
+
+    if not access_key or not secret_key:
+        raise RuntimeError(
+            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required when USE_IAM=false"
         )
 
-        self.loaded_model: LoadedModel = load_loaded_model(self.settings)
-        self.session = self.loaded_model.session
-        self.schema = self.loaded_model.schema
-        self.metadata = self.loaded_model.metadata
-        self.manifest = self.loaded_model.manifest
+    return False, None
 
-        self.effective_model_version = self.metadata.model_version or self.settings.model_version
-        self.model_name = self.metadata.model_name or "model"
-        self.input_name = self.loaded_model.input_name
-        self.output_names = tuple(self.loaded_model.output_names)
-        self.feature_order = tuple(self.schema.feature_order)
-        self.allow_extra_features = bool(self.schema.allow_extra_features)
-        self.ort_providers = tuple(self.settings.ort_providers)
-        self.prediction_cap_seconds = min(float(self.metadata.label_cap_seconds), 24.0 * 3600.0)
 
-        _log(
-            self.logger,
-            logging.INFO,
-            "model_loaded",
-            model_name=self.model_name,
-            model_version=self.effective_model_version,
-            schema_version=self.schema.schema_version,
-            feature_version=self.schema.feature_version,
-            model_path=str(self.loaded_model.model_path),
-            input_name=self.input_name,
-            output_names=list(self.output_names),
-            feature_count=len(self.feature_order),
-            ort_providers=list(self.ort_providers),
-        )
-
-    async def check_health(self) -> None:
-        if self.session is None:
-            raise RuntimeError("model session is not initialized")
-        if not self.input_name:
-            raise RuntimeError("model input name is missing")
-        if not self.output_names:
-            raise RuntimeError("model output names are missing")
-        if not self.feature_order:
-            raise RuntimeError("feature order is missing")
-
-    async def ready_summary(self) -> dict[str, Any]:
-        await self.check_health()
-        return {
-            "status": "ok",
-            "service_name": self.settings.service_name,
-            "model_name": self.model_name,
-            "model_version": self.effective_model_version,
-            "schema_version": self.schema.schema_version,
-            "feature_version": self.schema.feature_version,
-            "model_uri": self.settings.model_uri,
-            "model_path": str(self.loaded_model.model_path),
-            "cache_dir": str(self.loaded_model.cache_dir),
-            "feature_order": list(self.feature_order),
-            "allow_extra_features": self.allow_extra_features,
-            "prediction_cap_seconds": self.prediction_cap_seconds,
-            "manifest_model_sha256": self.manifest.model_sha256,
-        }
-
-    @serve.batch(
-        max_batch_size=SETTINGS.batch_max_size,
-        batch_wait_timeout_s=SETTINGS.batch_wait_timeout_s,
+def _static_credentials() -> tuple[dict[str, str], str]:
+    access_key = _require_nonempty(
+        os.getenv("AWS_ACCESS_KEY_ID"),
+        "AWS_ACCESS_KEY_ID is required when USE_IAM=false",
     )
-    async def predict_batch(self, feature_matrices: list[np.ndarray]) -> list[list[dict[str, Any]]]:
-        if not feature_matrices:
-            return []
+    secret_key = _require_nonempty(
+        os.getenv("AWS_SECRET_ACCESS_KEY"),
+        "AWS_SECRET_ACCESS_KEY is required when USE_IAM=false",
+    )
+    payload = {
+        "AWS_ACCESS_KEY_ID": access_key,
+        "AWS_SECRET_ACCESS_KEY": secret_key,
+    }
+    digest = hashlib.sha256(f"{access_key}\n{secret_key}".encode()).hexdigest()
+    return payload, digest
 
-        batch_start = time.perf_counter()
-        request_count = len(feature_matrices)
-        feature_count = len(self.feature_order)
 
-        matrices: list[np.ndarray] = []
-        row_counts: list[int] = []
+def load_deployment_settings() -> DeploymentSettings:
+    use_iam, irsa_role_arn = _validate_auth_mode()
 
-        for idx, matrix in enumerate(feature_matrices):
-            arr = np.asarray(matrix, dtype=np.float32)
-            if arr.ndim != 2:
-                raise ValueError(f"feature matrix at index {idx} must be 2D")
-            if arr.shape[1] != feature_count:
-                raise ValueError(
-                    f"feature matrix at index {idx} has {arr.shape[1]} features, expected {feature_count}"
-                )
-            if arr.shape[0] < 1:
-                raise ValueError(f"feature matrix at index {idx} must contain at least one row")
+    return DeploymentSettings(
+        namespace=_env_str("NAMESPACE", DEPLOYMENT_DEFAULTS["NAMESPACE"]),
+        rayservice_name=_env_str("RAYSERVICE_NAME", DEPLOYMENT_DEFAULTS["RAYSERVICE_NAME"]),
+        service_account_name=_env_str(
+            "SERVICE_ACCOUNT_NAME", DEPLOYMENT_DEFAULTS["SERVICE_ACCOUNT_NAME"]
+        ),
+        aws_secret_name=_env_str("AWS_SECRET_NAME", DEPLOYMENT_DEFAULTS["AWS_SECRET_NAME"]),
+        ray_image=_env_str("RAY_IMAGE", DEPLOYMENT_DEFAULTS["RAY_IMAGE"]),
+        ray_version=_env_str("RAY_VERSION", DEPLOYMENT_DEFAULTS["RAY_VERSION"]),
+        head_cpu=_env_str("HEAD_CPU", DEPLOYMENT_DEFAULTS["HEAD_CPU"]),
+        head_memory=_env_str("HEAD_MEMORY", DEPLOYMENT_DEFAULTS["HEAD_MEMORY"]),
+        worker_cpu=_env_str("WORKER_CPU", DEPLOYMENT_DEFAULTS["WORKER_CPU"]),
+        worker_memory=_env_str("WORKER_MEMORY", DEPLOYMENT_DEFAULTS["WORKER_MEMORY"]),
+        worker_replicas=_env_int("WORKER_REPLICAS", int(DEPLOYMENT_DEFAULTS["WORKER_REPLICAS"])),
+        worker_max_replicas=_env_int(
+            "WORKER_MAX_REPLICAS", int(DEPLOYMENT_DEFAULTS["WORKER_MAX_REPLICAS"])
+        ),
+        worker_ray_num_cpus=_env_str(
+            "WORKER_RAY_NUM_CPUS", DEPLOYMENT_DEFAULTS["WORKER_RAY_NUM_CPUS"]
+        ),
+        head_ray_num_cpus=_env_str(
+            "HEAD_RAY_NUM_CPUS", DEPLOYMENT_DEFAULTS["HEAD_RAY_NUM_CPUS"]
+        ),
+        model_cache_volume=_env_str(
+            "MODEL_CACHE_VOLUME", DEPLOYMENT_DEFAULTS["MODEL_CACHE_VOLUME"]
+        ),
+        model_cache_dir=_env_str("MODEL_CACHE_DIR", DEPLOYMENT_DEFAULTS["MODEL_CACHE_DIR"]),
+        run_as_user=_env_int("RUN_AS_USER", int(DEPLOYMENT_DEFAULTS["RUN_AS_USER"])),
+        run_as_group=_env_int("RUN_AS_GROUP", int(DEPLOYMENT_DEFAULTS["RUN_AS_GROUP"])),
+        fs_group=_env_int("FS_GROUP", int(DEPLOYMENT_DEFAULTS["FS_GROUP"])),
+        use_iam=use_iam,
+        irsa_role_arn=irsa_role_arn,
+    )
 
-            matrices.append(arr)
-            row_counts.append(int(arr.shape[0]))
 
-        batch_instance_count = sum(row_counts)
-        if batch_instance_count == 0:
-            return [[] for _ in feature_matrices]
+def load_app_env() -> dict[str, str]:
+    env: dict[str, str] = {}
 
-        combined = np.concatenate(matrices, axis=0)
+    for name in APP_ENV_ORDER:
+        default = APP_ENV_DEFAULTS[name]
+        value = _env_str(name, default)
 
-        with self.tracer.start_as_current_span("onnx_inference") as span:
-            span.set_attribute("batch.request_count", request_count)
-            span.set_attribute("batch.size", batch_instance_count)
-            span.set_attribute("model.name", self.model_name)
-            span.set_attribute("model.version", self.effective_model_version)
-            span.set_attribute("onnx.input.name", self.input_name)
-            span.set_attribute("onnx.provider", ",".join(self.ort_providers))
+        if name == "LOG_LEVEL":
+            value = _validate_log_level(value)
 
-            try:
-                outputs = await asyncio.to_thread(
-                    self.session.run,
-                    self.output_names,
-                    {self.input_name: combined},
-                )
-            except Exception as exc:
-                self.inference_error_counter.add(
-                    request_count,
-                    attributes={
-                        "model.name": self.model_name,
-                        "model.version": self.effective_model_version,
+        if name in REQUIRED_APP_ENV_NAMES and (not value or value == PLACEHOLDER_VALUES[name]):
+            raise RuntimeError(f"{name} is required and must be set explicitly")
+
+        env[name] = value
+
+    return env
+
+
+def _base_labels(settings: DeploymentSettings) -> dict[str, str]:
+    return {
+        "app.kubernetes.io/name": settings.rayservice_name,
+        "app.kubernetes.io/managed-by": "inference-service",
+        "app.kubernetes.io/component": "inference",
+    }
+
+
+def _secret_ref_env(name: str, secret_name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "valueFrom": {"secretKeyRef": {"name": secret_name, "key": name}},
+    }
+
+
+def _build_container_env(app_env: dict[str, str], settings: DeploymentSettings) -> list[dict[str, Any]]:
+    env: list[dict[str, Any]] = []
+
+    for name in APP_ENV_ORDER:
+        if name in {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}:
+            if settings.use_iam:
+                continue
+            env.append(_secret_ref_env(name, settings.aws_secret_name))
+            continue
+
+        if name == "USE_IAM":
+            env.append({"name": name, "value": "true" if settings.use_iam else "false"})
+            continue
+
+        env.append({"name": name, "value": app_env[name]})
+
+    return env
+
+
+def _container_security_context() -> dict[str, Any]:
+    return {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+
+
+def _probe_command(command: str) -> dict[str, Any]:
+    return {"exec": {"command": ["bash", "-lc", command]}}
+
+
+def _ray_health_check(address: str) -> str:
+    return f"ray health-check --address {address} >/dev/null 2>&1"
+
+
+def _python_http_check(url: str, timeout_s: int = 5) -> str:
+    return textwrap.dedent(
+        f"""
+        python3 - <<'PY'
+        import sys
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen({url!r}, timeout={timeout_s}) as resp:
+                body = resp.read().decode('utf-8', 'ignore')
+        except Exception:
+            raise SystemExit(1)
+
+        raise SystemExit(0 if 'success' in body else 1)
+        PY
+        """
+    ).strip()
+
+
+def _head_probes() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ray = _ray_health_check("127.0.0.1:6379")
+    return _probe_command(ray), _probe_command(ray), _probe_command(ray)
+
+
+def _worker_probes() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    ray = _ray_health_check("127.0.0.1:52365")
+    serve = _python_http_check("http://127.0.0.1:8000/-/healthz")
+    return _probe_command(ray), _probe_command(f"{ray} && {serve}"), _probe_command(f"{ray} && {serve}")
+
+
+def _pod_template_common(settings: DeploymentSettings) -> dict[str, Any]:
+    return {
+        "securityContext": {
+            "runAsNonRoot": True,
+            "runAsUser": settings.run_as_user,
+            "runAsGroup": settings.run_as_group,
+            "fsGroup": settings.fs_group,
+        },
+        "terminationGracePeriodSeconds": 30,
+        "volumes": [
+            {"name": "tmp", "emptyDir": {}},
+            {"name": "model-cache", "emptyDir": {}},
+            {"name": "shared-mem", "emptyDir": {"medium": "Memory", "sizeLimit": "3Gi"}},
+        ],
+    }
+
+
+def _head_container(settings: DeploymentSettings, env: list[dict[str, Any]]) -> dict[str, Any]:
+    liveness, readiness, startup = _head_probes()
+    return {
+        "name": "ray-head",
+        "image": settings.ray_image,
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": _container_security_context(),
+        "resources": {
+            "requests": {"cpu": settings.head_cpu, "memory": settings.head_memory},
+            "limits": {"cpu": settings.head_cpu, "memory": settings.head_memory},
+        },
+        "volumeMounts": [
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "model-cache", "mountPath": settings.model_cache_volume},
+            {"name": "shared-mem", "mountPath": "/dev/shm"},
+        ],
+        "env": env,
+        "startupProbe": startup,
+        "readinessProbe": readiness,
+        "livenessProbe": liveness,
+    }
+
+
+def _worker_container(settings: DeploymentSettings, env: list[dict[str, Any]]) -> dict[str, Any]:
+    liveness, readiness, startup = _worker_probes()
+    return {
+        "name": "ray-worker",
+        "image": settings.ray_image,
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": _container_security_context(),
+        "resources": {
+            "requests": {"cpu": settings.worker_cpu, "memory": settings.worker_memory},
+            "limits": {"cpu": settings.worker_cpu, "memory": settings.worker_memory},
+        },
+        "volumeMounts": [
+            {"name": "tmp", "mountPath": "/tmp"},
+            {"name": "model-cache", "mountPath": settings.model_cache_volume},
+            {"name": "shared-mem", "mountPath": "/dev/shm"},
+        ],
+        "env": env,
+        "startupProbe": startup,
+        "readinessProbe": readiness,
+        "livenessProbe": liveness,
+    }
+
+
+def _secret_doc_metadata(settings: DeploymentSettings) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": settings.aws_secret_name,
+            "namespace": settings.namespace,
+            "labels": _base_labels(settings),
+        },
+    }
+
+
+def build_namespace_doc(settings: DeploymentSettings) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {"name": settings.namespace, "labels": _base_labels(settings)},
+    }
+
+
+def build_service_account_doc(settings: DeploymentSettings) -> dict[str, Any] | None:
+    if not settings.use_iam:
+        return None
+
+    role_arn = _require_nonempty(
+        settings.irsa_role_arn,
+        "KUBERAY_IAM_ROLE_ARN is required when USE_IAM=true",
+    )
+    return {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            "name": settings.service_account_name,
+            "namespace": settings.namespace,
+            "labels": _base_labels(settings),
+            "annotations": {"eks.amazonaws.com/role-arn": role_arn},
+        },
+    }
+
+
+def build_secret_doc(settings: DeploymentSettings, secret_data: dict[str, str]) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": settings.aws_secret_name,
+            "namespace": settings.namespace,
+            "labels": _base_labels(settings),
+        },
+        "type": "Opaque",
+        "stringData": secret_data,
+    }
+
+
+def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str], revision: str) -> dict[str, Any]:
+    labels = _base_labels(settings)
+    annotations = {AUTH_MODE_ANNOTATION: "iam" if settings.use_iam else "static", MANIFEST_REVISION_ANNOTATION: revision}
+    container_env = _build_container_env(app_env, settings)
+    pod_template_common = _pod_template_common(settings)
+
+    head_container = _head_container(settings, container_env)
+    worker_container = _worker_container(settings, container_env)
+
+    if settings.use_iam:
+        head_template_spec = {**pod_template_common, "serviceAccountName": settings.service_account_name, "containers": [head_container]}
+        worker_template_spec = {**pod_template_common, "serviceAccountName": settings.service_account_name, "containers": [worker_container]}
+    else:
+        head_template_spec = {**pod_template_common, "containers": [head_container]}
+        worker_template_spec = {**pod_template_common, "containers": [worker_container]}
+
+    serve_config_v2 = textwrap.dedent(
+        """
+        proxy_location: EveryNode
+        http_options:
+          host: 0.0.0.0
+          port: 8000
+        applications:
+          - name: tabular_inference
+            route_prefix: /
+            import_path: service:app
+        """
+    ).strip() + "\n"
+
+    return {
+        "apiVersion": "ray.io/v1",
+        "kind": "RayService",
+        "metadata": {
+            "name": settings.rayservice_name,
+            "namespace": settings.namespace,
+            "labels": labels,
+            "annotations": annotations,
+        },
+        "spec": {
+            "serviceUnhealthySecondThreshold": 300,
+            "deploymentUnhealthySecondThreshold": 300,
+            "rayClusterConfig": {
+                "rayVersion": settings.ray_version,
+                "enableInTreeAutoscaling": True,
+                "autoscalerOptions": {"version": "v2", "idleTimeoutSeconds": 60},
+                "headGroupSpec": {
+                    "serviceType": "ClusterIP",
+                    "rayStartParams": {
+                        "dashboard-host": "0.0.0.0",
+                        "num-cpus": settings.head_ray_num_cpus,
                     },
-                )
-                span.record_exception(exc)
-                span.set_status(Status(StatusCode.ERROR))
-                _log_exception(
-                    self.logger,
-                    "predict_batch_failed",
-                    model_name=self.model_name,
-                    model_version=self.effective_model_version,
-                    batch_requests=request_count,
-                    batch_size=batch_instance_count,
-                    error_type=exc.__class__.__name__,
-                )
-                raise
-
-        elapsed_ms = (time.perf_counter() - batch_start) * 1000.0
-        self.inference_request_counter.add(
-            request_count,
-            attributes={
-                "model.name": self.model_name,
-                "model.version": self.effective_model_version,
-            },
-        )
-        self.inference_duration_histogram.record(
-            elapsed_ms,
-            attributes={
-                "model.name": self.model_name,
-                "model.version": self.effective_model_version,
-            },
-        )
-        self.inference_batch_size_histogram.record(
-            batch_instance_count,
-            attributes={
-                "model.name": self.model_name,
-                "model.version": self.effective_model_version,
-            },
-        )
-
-        all_predictions = split_model_outputs(
-            outputs,
-            self.output_names,
-            row_count=batch_instance_count,
-        )
-
-        partitioned: list[list[dict[str, Any]]] = []
-        offset = 0
-        for row_count in row_counts:
-            partitioned.append(all_predictions[offset : offset + row_count])
-            offset += row_count
-
-        return partitioned
-
-
-class TabularInferenceIngress:
-    def __init__(self, backend: DeploymentHandle) -> None:
-        self.settings = SETTINGS
-        self.backend = backend
-        self.logger = logger
-        self.tracer = trace.get_tracer("tabular-inference-http")
-        self.meter = metrics.get_meter("tabular-inference-http")
-        self._telemetry = initialize_telemetry(self.settings)
-
-        self.http_request_counter = self.meter.create_counter(
-            name="http.server.request_count",
-            description="Total HTTP requests",
-            unit="1",
-        )
-        self.http_error_counter = self.meter.create_counter(
-            name="http.server.errors",
-            description="Total failed HTTP requests",
-            unit="1",
-        )
-        self.http_duration_histogram = self.meter.create_histogram(
-            name="http.server.duration",
-            description="HTTP request latency",
-            unit="ms",
-        )
-        self.http_active_requests = self.meter.create_up_down_counter(
-            name="active.requests",
-            description="Number of in-flight HTTP requests",
-            unit="1",
-        )
-
-        self._backend_info_cache: dict[str, Any] | None = None
-
-    async def _get_backend_info(self, refresh: bool = False) -> dict[str, Any]:
-        if self._backend_info_cache is not None and not refresh:
-            return self._backend_info_cache
-
-        raw = await self.backend.ready_summary.remote()
-        if not isinstance(raw, dict):
-            raise RuntimeError("backend ready_summary returned an invalid payload")
-
-        self._backend_info_cache = raw
-        return raw
-
-    async def _handle_ready(self, refresh: bool) -> tuple[dict[str, Any] | JSONResponse, int]:
-        try:
-            info = await self._get_backend_info(refresh=refresh)
-        except Exception as exc:
-            return _json_response(f"Backend unavailable: {exc}", 503), 503
-
-        payload = {
-            "status": "ok",
-            "service_name": self.settings.service_name,
-            "service_version": self.settings.service_version,
-            "deployment": self.settings.serve_deployment_name,
-            "model_name": info["model_name"],
-            "model_version": info["model_version"],
-            "schema_version": info["schema_version"],
-            "feature_version": info["feature_version"],
-            "model_uri": info["model_uri"],
-            "model_path": info["model_path"],
-            "feature_order": info["feature_order"],
-            "allow_extra_features": info["allow_extra_features"],
-            "prediction_cap_seconds": info["prediction_cap_seconds"],
-        }
-        return payload, 200
-
-    async def _handle_predict(
-        self,
-        request: Request,
-        request_id: str,
-        request_start: float,
-    ) -> tuple[dict[str, Any] | JSONResponse, int]:
-        try:
-            payload = await request.json()
-        except (JSONDecodeError, ValueError):
-            return _json_response("Invalid JSON body", 400), 400
-
-        try:
-            rows = coerce_instances(payload)
-            n_instances = len(rows)
-
-            if n_instances < 1:
-                raise ValueError("At least one instance is required")
-            if n_instances > self.settings.max_instances_per_request:
-                raise ValueError(
-                    f"Too many instances: {n_instances} > {self.settings.max_instances_per_request}"
-                )
-
-            try:
-                backend_info = await self._get_backend_info(refresh=False)
-            except Exception as exc:
-                return _json_response(f"Backend unavailable: {exc}", 503), 503
-
-            with self.tracer.start_as_current_span("prepare_input") as span:
-                span.set_attribute("batch.size", n_instances)
-                span.set_attribute("model.name", backend_info["model_name"])
-                span.set_attribute("model.version", backend_info["model_version"])
-                span.set_attribute("feature.count", len(backend_info["feature_order"]))
-                span.set_attribute("request.id", request_id)
-
-            feature_matrix = build_feature_matrix(
-                rows,
-                backend_info["feature_order"],
-                allow_extra_features=bool(backend_info["allow_extra_features"]),
-            )
-
-            try:
-                predictions = await self.backend.predict_batch.remote(feature_matrix)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _log_exception(
-                    self.logger,
-                    "predict_backend_failed",
-                    route="/predict",
-                    request_id=request_id,
-                    model_name=backend_info["model_name"],
-                    model_version=backend_info["model_version"],
-                    error_type=exc.__class__.__name__,
-                )
-                return _json_response("Inference failed", 500), 500
-
-            total_ms = (time.perf_counter() - request_start) * 1000.0
-            if total_ms >= self.settings.slow_request_ms:
-                _log(
-                    self.logger,
-                    logging.WARNING,
-                    "predict_slow_request",
-                    route="/predict",
-                    request_id=request_id,
-                    model_name=backend_info["model_name"],
-                    model_version=backend_info["model_version"],
-                    n_instances=n_instances,
-                    latency_ms=round(total_ms, 3),
-                    slow_request_threshold_ms=self.settings.slow_request_ms,
-                )
-
-            return (
-                {
-                    "model_version": backend_info["model_version"],
-                    "n_instances": n_instances,
-                    "predictions": predictions,
+                    "template": {"spec": head_template_spec},
                 },
-                200,
-            )
-
-        except ValueError as exc:
-            backend_info = self._backend_info_cache
-            model_name = backend_info["model_name"] if backend_info else "model"
-            model_version = backend_info["model_version"] if backend_info else self.settings.model_version
-
-            _log(
-                self.logger,
-                logging.WARNING,
-                "predict_validation_failed",
-                route="/predict",
-                request_id=request_id,
-                model_name=model_name,
-                model_version=model_version,
-                error_type="validation_error",
-                error_message=str(exc),
-            )
-            return _json_response(str(exc), 422), 422
-
-        except Exception as exc:
-            _log_exception(
-                self.logger,
-                "predict_internal_failure",
-                route="/predict",
-                request_id=request_id,
-                error_type=exc.__class__.__name__,
-            )
-            return _json_response("Inference failed", 500), 500
-
-    async def __call__(self, request: Request) -> dict[str, Any] | JSONResponse:
-        path = _route_key(request.url.path)
-        method = request.method.upper()
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
-        request_start = time.perf_counter()
-        status_code = 500
-
-        ctx = extract(dict(request.headers))
-        self.http_active_requests.add(1, attributes={"route": path})
-        self.http_request_counter.add(
-            1,
-            attributes={"route": path, "method": method},
-        )
-
-        with self.tracer.start_as_current_span(
-            f"HTTP {method} {path}",
-            context=ctx,
-            kind=SpanKind.SERVER,
-        ) as span:
-            span.set_attribute("http.method", method)
-            span.set_attribute("http.route", path)
-            span.set_attribute("http.request_id", request_id)
-            span.set_attribute("service.name", self.settings.service_name)
-            span.set_attribute("service.version", self.settings.service_version)
-            span.set_attribute("deployment.environment", self.settings.deployment_environment)
-            span.set_attribute("k8s.cluster.name", self.settings.cluster_name)
-            span.set_attribute("service.instance.id", self.settings.instance_id)
-
-            try:
-                if _is_ready_request(path, method):
-                    response, status_code = await self._handle_ready(refresh=True)
-                elif path == "/healthz" and method in {"GET", "HEAD"}:
-                    response, status_code = ({"status": "ok"}, 200)
-                elif _is_predict_request(path, method):
-                    response, status_code = await self._handle_predict(request, request_id, request_start)
-                else:
-                    response, status_code = (_json_response("Not found", 404), 404)
-
-                span.set_attribute("http.status_code", status_code)
-                if status_code >= 500:
-                    span.set_status(Status(StatusCode.ERROR))
-                return response
-
-            except asyncio.CancelledError:
-                span.set_status(Status(StatusCode.ERROR))
-                raise
-
-            except Exception as exc:
-                status_code = 500
-                span.record_exception(exc)
-                span.set_status(Status(StatusCode.ERROR))
-                _log_exception(
-                    self.logger,
-                    "request_failed",
-                    route=path,
-                    request_id=request_id,
-                    error_type=exc.__class__.__name__,
-                )
-                return _json_response("Internal server error", 500)
-
-            finally:
-                elapsed_ms = (time.perf_counter() - request_start) * 1000.0
-                self.http_duration_histogram.record(
-                    elapsed_ms,
-                    attributes={
-                        "route": path,
-                        "method": method,
-                        "status_code": status_code,
-                    },
-                )
-                if status_code >= 400:
-                    self.http_error_counter.add(
-                        1,
-                        attributes={
-                            "route": path,
-                            "method": method,
-                            "status_code": status_code,
-                        },
-                    )
-                self.http_active_requests.add(-1, attributes={"route": path})
+                "workerGroupSpecs": [
+                    {
+                        "groupName": "inference-workers",
+                        "replicas": settings.worker_replicas,
+                        "minReplicas": 1,
+                        "maxReplicas": settings.worker_max_replicas,
+                        "rayStartParams": {"num-cpus": settings.worker_ray_num_cpus},
+                        "template": {"spec": worker_template_spec},
+                    }
+                ],
+            },
+            "serveConfigV2": serve_config_v2,
+        },
+    }
 
 
-@serve.deployment(
-    name=BACKEND_DEPLOYMENT_NAME,
-    num_replicas="auto",
-    autoscaling_config=_autoscaling_config(),
-    ray_actor_options={"num_cpus": BACKEND_NUM_CPUS},
-    max_ongoing_requests=BACKEND_MAX_ONGOING_REQUESTS,
-    health_check_period_s=SETTINGS.serve_health_check_period_s,
-    health_check_timeout_s=SETTINGS.serve_health_check_timeout_s,
-    graceful_shutdown_wait_loop_s=SETTINGS.serve_graceful_shutdown_wait_loop_s,
-    graceful_shutdown_timeout_s=SETTINGS.serve_graceful_shutdown_timeout_s,
-)
-class InferenceBackendDeployment(InferenceBackend):
-    pass
+def _canonical_payload(docs: list[dict[str, Any]], secret_data: dict[str, str] | None) -> str:
+    payload = {"docs": docs, "secret_data": secret_data or {}}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-@serve.deployment(
-    name=SETTINGS.serve_deployment_name,
-    num_replicas="auto",
-    autoscaling_config=_autoscaling_config(),
-    ray_actor_options={"num_cpus": INGRESS_NUM_CPUS},
-    max_ongoing_requests=INGRESS_MAX_ONGOING_REQUESTS,
-    health_check_period_s=SETTINGS.serve_health_check_period_s,
-    health_check_timeout_s=SETTINGS.serve_health_check_timeout_s,
-    graceful_shutdown_wait_loop_s=SETTINGS.serve_graceful_shutdown_wait_loop_s,
-    graceful_shutdown_timeout_s=SETTINGS.serve_graceful_shutdown_timeout_s,
-)
-class TabularInferenceIngressDeployment(TabularInferenceIngress):
-    pass
+def _fingerprint(payload: str) -> tuple[str, str]:
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    revision = base64.b32encode(bytes.fromhex(digest)).decode("ascii").rstrip("=").lower()[:16]
+    return digest, revision
 
 
-app = TabularInferenceIngressDeployment.bind(InferenceBackendDeployment.bind())
+def ensure_state_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def read_previous_hash() -> str | None:
+    if not HASH_PATH.exists():
+        return None
+    value = HASH_PATH.read_text(encoding="utf-8").strip()
+    return value or None
+
+
+def write_state(rendered_yaml: str, digest: str) -> None:
+    ensure_state_dir()
+    RENDERED_PATH.write_text(rendered_yaml, encoding="utf-8")
+    HASH_PATH.write_text(digest + "\n", encoding="utf-8")
+
+
+def render_documents(docs: list[dict[str, Any]]) -> str:
+    return yaml.safe_dump_all(docs, sort_keys=False, default_flow_style=False, explicit_start=True)
+
+
+def kubectl_apply_yaml(rendered_yaml: str) -> None:
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=rendered_yaml, text=True, check=True)
+
+
+def kubectl_delete_yaml(rendered_yaml: str) -> None:
+    subprocess.run(["kubectl", "delete", "-f", "-", "--ignore-not-found"], input=rendered_yaml, text=True, check=True)
+
+
+def kubectl_apply_doc(doc: dict[str, Any]) -> None:
+    kubectl_apply_yaml(render_documents([doc]))
+
+
+def kubectl_delete_doc(doc: dict[str, Any]) -> None:
+    kubectl_delete_yaml(render_documents([doc]))
+
+
+def rollout() -> int:
+    settings = load_deployment_settings()
+    app_env = load_app_env()
+
+    secret_doc: dict[str, Any] | None = None
+    secret_data: dict[str, str] | None = None
+    if not settings.use_iam:
+        secret_data, _ = _static_credentials()
+        secret_doc = build_secret_doc(settings, secret_data)
+
+    namespace_doc = build_namespace_doc(settings)
+    sa_doc = build_service_account_doc(settings)
+    canonical_docs = [namespace_doc] + ([sa_doc] if sa_doc is not None else [])
+
+    digest, revision = _fingerprint(_canonical_payload(canonical_docs, secret_data))
+    previous = read_previous_hash()
+    if previous == digest and RENDERED_PATH.exists():
+        print(f"[OK] Manifest unchanged; hash={digest}")
+        return 0
+
+    rayservice_doc = build_rayservice_doc(settings, app_env, revision)
+    docs_to_apply = [namespace_doc]
+    if secret_doc is not None:
+        docs_to_apply.append(secret_doc)
+    if sa_doc is not None:
+        docs_to_apply.append(sa_doc)
+    docs_to_apply.append(rayservice_doc)
+
+    for doc in docs_to_apply:
+        kubectl_apply_doc(doc)
+
+    write_state(render_documents([*canonical_docs, rayservice_doc]), digest)
+    print(f"[OK] Rollout applied; hash={digest}")
+    return 0
+
+
+def delete() -> int:
+    settings = load_deployment_settings()
+
+    if RENDERED_PATH.exists():
+        rendered_yaml = RENDERED_PATH.read_text(encoding="utf-8")
+        docs = [doc for doc in yaml.safe_load_all(rendered_yaml) if isinstance(doc, dict)]
+        namespace_doc = next((doc for doc in docs if doc.get("kind") == "Namespace"), build_namespace_doc(settings))
+        sa_doc = next((doc for doc in docs if doc.get("kind") == "ServiceAccount"), None)
+        rayservice_doc = next((doc for doc in docs if doc.get("kind") == "RayService"), None)
+    else:
+        namespace_doc = build_namespace_doc(settings)
+        sa_doc = build_service_account_doc(settings)
+        rayservice_doc = build_rayservice_doc(settings, load_app_env(), "bootstrap")
+
+    secret_doc = None
+    if not settings.use_iam:
+        secret_doc = _secret_doc_metadata(settings)
+
+    if rayservice_doc is not None:
+        kubectl_delete_doc(rayservice_doc)
+    if sa_doc is not None:
+        kubectl_delete_doc(sa_doc)
+    if secret_doc is not None:
+        kubectl_delete_doc(secret_doc)
+    kubectl_delete_doc(namespace_doc)
+
+    for path in (RENDERED_PATH, HASH_PATH):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    print("[OK] Delete applied")
+    return 0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="inference_service.py",
+        description="Render and lifecycle-manage the KubeRay RayService deployment.",
+    )
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument("--rollout", action="store_true", help="Render and apply manifests")
+    action.add_argument("--delete", action="store_true", help="Delete rendered manifests")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    try:
+        if args.rollout:
+            return rollout()
+        if args.delete:
+            return delete()
+        return 1
+    except subprocess.CalledProcessError as exc:
+        print(f"[ERROR] kubectl failed with exit code {exc.returncode}", file=sys.stderr)
+        return exc.returncode or 1
+    except Exception as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
-    serve.run(app, route_prefix="/")
+    raise SystemExit(main())

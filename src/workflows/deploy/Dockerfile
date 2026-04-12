@@ -17,7 +17,7 @@ WORKDIR /app
 # - ca-certificates: TLS for pip, S3, HTTPS endpoints
 # - tini: proper PID 1 signal handling and child reaping
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && apt-get install -y --no-install-recommends ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Deterministic non-root user/group and writable cache path for per-replica model caching.
