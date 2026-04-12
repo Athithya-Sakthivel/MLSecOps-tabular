@@ -39,24 +39,7 @@ make train                                 # run Flyte training workflow (consum
 
 aws s3 ls s3://$S3_BUCKET/model-artifacts/ --recursive
 
-
-
-
-source .venv_deploy/bin/activate
-unset RAY_ADDRESS
-export MODEL_URI=s3://e2e-mlops-data-681802563986/model-artifacts/trip_eta_lgbm_v1/bceb2eb9-e373-4c44-91e5-abde147fec8b/2025-01-06
-export MODEL_VERSION=v1
-export MODEL_SHA256=29505278adb825a2f79812221b5d3a245145e140973d0354b74e278b50811976
-export MODEL_INPUT_NAME=input
-export MODEL_OUTPUT_NAMES=variable
-export FEATURE_ORDER=pickup_hour,pickup_dow,pickup_month,pickup_is_weekend,pickup_borough_id,pickup_zone_id,pickup_service_zone_id,dropoff_borough_id,dropoff_zone_id,dropoff_service_zone_id,route_pair_id,avg_duration_7d_zone_hour,avg_fare_30d_zone,trip_count_90d_zone_hour
-export ALLOW_EXTRA_FEATURES=false
-export MODEL_CACHE_DIR=/mlsecops/model-cache
-bash src/workflows/deploy/test_locally.sh
-
-
-
-source .venv_deploy/bin/activate
+make core && bash src/infra/deploy/kuberay_operator.sh --rollout
 
 export MODEL_URI=s3://e2e-mlops-data-681802563986/model-artifacts/trip_eta_lgbm_v1/bceb2eb9-e373-4c44-91e5-abde147fec8b/2025-01-06
 export MODEL_VERSION=v1
@@ -66,6 +49,17 @@ export MODEL_OUTPUT_NAMES=variable
 export FEATURE_ORDER=pickup_hour,pickup_dow,pickup_month,pickup_is_weekend,pickup_borough_id,pickup_zone_id,pickup_service_zone_id,dropoff_borough_id,dropoff_zone_id,dropoff_service_zone_id,route_pair_id,avg_duration_7d_zone_hour,avg_fare_30d_zone,trip_count_90d_zone_hour
 export ALLOW_EXTRA_FEATURES=false
 export MODEL_CACHE_DIR=/mlsecops/model-cache
-export LOG_LEVEL=INFO
-bash src/workflows/deploy/test_locally.sh
+export LOG_LEVEL=WARNING
+export RAY_IMAGE=ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-12-18-01--cb879d3@sha256:745919dfe5ffec5474c0f07d28ed067e30ea232ccf1d49b7d177b0096e8a6bdf
+export USE_IAM=false
 
+
+python3 src/infra/deploy/inference_service.py --delete
+python3 src/infra/deploy/inference_service.py --rollout
+sleep 120
+kubectl get pods -A
+
+python3 src/infra/deploy/inference_service.py --delete
+
+
+kubectl port-forward -n inference svc/tabular-inference-t9m5h-head-svc 8000:8000

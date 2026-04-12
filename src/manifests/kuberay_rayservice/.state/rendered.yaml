@@ -1,0 +1,216 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference
+  labels:
+    app.kubernetes.io/name: tabular-inference
+    app.kubernetes.io/managed-by: inference-service
+    app.kubernetes.io/component: inference
+---
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: tabular-inference
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: tabular-inference
+    app.kubernetes.io/managed-by: inference-service
+    app.kubernetes.io/component: inference
+  annotations:
+    inference-service.io/rendered-sha256: 3dddfdd97d419b2d259a81799d70c49c145c7d41a9373a8e859cdd5ebf7a26a5
+spec:
+  serviceUnhealthySecondThreshold: 300
+  deploymentUnhealthySecondThreshold: 300
+  rayClusterConfig:
+    rayVersion: 2.54.1
+    enableInTreeAutoscaling: true
+    autoscalerOptions:
+      version: v2
+      idleTimeoutSeconds: 60
+    headGroupSpec:
+      serviceType: ClusterIP
+      rayStartParams:
+        dashboard-host: 0.0.0.0
+        include-dashboard: 'true'
+        num-cpus: '0'
+      template:
+        spec:
+          securityContext: &id001
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+          terminationGracePeriodSeconds: 30
+          volumes: &id002
+          - name: model-cache
+            emptyDir: {}
+          containers:
+          - name: ray-head
+            image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-12-18-01--cb879d3@sha256:745919dfe5ffec5474c0f07d28ed067e30ea232ccf1d49b7d177b0096e8a6bdf
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: '1'
+                memory: 3Gi
+              limits:
+                cpu: '1'
+                memory: 3Gi
+            volumeMounts:
+            - name: model-cache
+              mountPath: /mlsecops
+            env: &id003
+            - name: DEPLOYMENT_PROFILE
+              value: prod
+            - name: OTEL_SERVICE_NAME
+              value: tabular-inference
+            - name: SERVICE_VERSION
+              value: v1
+            - name: DEPLOYMENT_ENVIRONMENT
+              value: prod
+            - name: K8S_CLUSTER_NAME
+              value: production-cluster
+            - name: MODEL_URI
+              value: s3://e2e-mlops-data-681802563986/model-artifacts/trip_eta_lgbm_v1/bceb2eb9-e373-4c44-91e5-abde147fec8b/2025-01-06
+            - name: MODEL_VERSION
+              value: v1
+            - name: MODEL_CACHE_DIR
+              value: /mlsecops/model-cache
+            - name: FEATURE_ORDER
+              value: pickup_hour,pickup_dow,pickup_month,pickup_is_weekend,pickup_borough_id,pickup_zone_id,pickup_service_zone_id,dropoff_borough_id,dropoff_zone_id,dropoff_service_zone_id,route_pair_id,avg_duration_7d_zone_hour,avg_fare_30d_zone,trip_count_90d_zone_hour
+            - name: MODEL_OUTPUT_NAMES
+              value: variable
+            - name: MAX_INSTANCES_PER_REQUEST
+              value: '256'
+            - name: SERVE_DEPLOYMENT_NAME
+              value: tabular_inference
+            - name: SERVE_NUM_CPUS
+              value: '1.0'
+            - name: SERVE_MIN_REPLICAS
+              value: '1'
+            - name: SERVE_INITIAL_REPLICAS
+              value: '1'
+            - name: SERVE_MAX_REPLICAS
+              value: '1'
+            - name: SERVE_TARGET_ONGOING_REQUESTS
+              value: '1'
+            - name: SERVE_MAX_ONGOING_REQUESTS
+              value: '2'
+            - name: SERVE_UPSCALE_DELAY_S
+              value: '3.0'
+            - name: SERVE_DOWNSCALE_DELAY_S
+              value: '60.0'
+            - name: SERVE_BATCH_MAX_SIZE
+              value: '16'
+            - name: SERVE_BATCH_WAIT_TIMEOUT_S
+              value: '0.005'
+            - name: ORT_INTRA_OP_NUM_THREADS
+              value: '1'
+            - name: ORT_INTER_OP_NUM_THREADS
+              value: '1'
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://signoz-otel-collector.signoz.svc.cluster.local:4317
+            - name: OTEL_TRACES_SAMPLER
+              value: parentbased_traceidratio
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: '0.10'
+            - name: LOG_LEVEL
+              value: WARNING
+            - name: SLOW_REQUEST_MS
+              value: '500.0'
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-credentials
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: USE_IAM
+              value: 'false'
+            - name: RAY_raylet_start_wait_time_s
+              value: '120'
+            - name: RAY_gcs_server_request_timeout_seconds
+              value: '30'
+            startupProbe:
+              exec:
+                command:
+                - bash
+                - -lc
+                - ray health-check --address 127.0.0.1:6379 > /dev/null 2>&1
+              initialDelaySeconds: 0
+              periodSeconds: 5
+              timeoutSeconds: 30
+              failureThreshold: 60
+            livenessProbe:
+              exec:
+                command:
+                - bash
+                - -lc
+                - ray health-check --address 127.0.0.1:6379 > /dev/null 2>&1
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              timeoutSeconds: 30
+              failureThreshold: 120
+            readinessProbe:
+              exec:
+                command:
+                - bash
+                - -lc
+                - ray health-check --address 127.0.0.1:6379 > /dev/null 2>&1
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              timeoutSeconds: 30
+              failureThreshold: 10
+    workerGroupSpecs:
+    - groupName: inference-workers
+      replicas: 1
+      minReplicas: 1
+      maxReplicas: 1
+      rayStartParams:
+        num-cpus: '1'
+      template:
+        spec:
+          securityContext: *id001
+          terminationGracePeriodSeconds: 30
+          volumes: *id002
+          containers:
+          - name: ray-worker
+            image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-12-18-01--cb879d3@sha256:745919dfe5ffec5474c0f07d28ed067e30ea232ccf1d49b7d177b0096e8a6bdf
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: '1'
+                memory: 1536Mi
+              limits:
+                cpu: '1'
+                memory: 1536Mi
+            volumeMounts:
+            - name: model-cache
+              mountPath: /mlsecops
+            env: *id003
+            startupProbe:
+              exec:
+                command:
+                - bash
+                - -lc
+                - ray health-check --address 127.0.0.1:52365 > /dev/null 2>&1
+              initialDelaySeconds: 0
+              periodSeconds: 5
+              timeoutSeconds: 30
+              failureThreshold: 60
+            livenessProbe:
+              exec:
+                command:
+                - bash
+                - -lc
+                - ray health-check --address 127.0.0.1:52365 > /dev/null 2>&1
+              initialDelaySeconds: 30
+              periodSeconds: 5
+              timeoutSeconds: 30
+              failureThreshold: 120
+  serveConfigV2: "proxy_location: EveryNode\nhttp_options:\n  host: 0.0.0.0\n  port:\
+    \ 8000\napplications:\n  - name: tabular_inference\n    route_prefix: /predict\n\
+    \    import_path: service:app\n"

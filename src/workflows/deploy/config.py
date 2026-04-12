@@ -29,7 +29,6 @@ PROD_DEFAULTS: dict[str, str] = {
     "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
     "OTEL_TRACES_SAMPLER_ARG": "0.10",
     "LOG_LEVEL": "WARNING",
-    "SLOW_REQUEST_MS": "500.0",
 }
 
 
@@ -140,9 +139,8 @@ def _env_tuple(name: str, default: tuple[str, ...], sep: str = ",") -> tuple[str
 
 def _env_otlp_timeout_seconds() -> float:
     """
-    OpenTelemetry's current OTLP timeout env var is OTEL_EXPORTER_OTLP_TIMEOUT
-    in milliseconds. Keep the legacy *_SECONDS variable as a fallback for
-    existing deployments.
+    OpenTelemetry exports commonly use OTEL_EXPORTER_OTLP_TIMEOUT in milliseconds.
+    Keep OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS as a fallback for older deployments.
     """
     raw_ms = os.getenv("OTEL_EXPORTER_OTLP_TIMEOUT")
     if raw_ms is not None and raw_ms.strip() != "":
@@ -156,7 +154,7 @@ def _env_otlp_timeout_seconds() -> float:
 
 
 def _validate_log_level(value: str) -> str:
-    allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+    allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET", "WARN"}
     normalized = value.strip().upper()
     if not normalized:
         return "WARNING"
@@ -164,7 +162,7 @@ def _validate_log_level(value: str) -> str:
         raise RuntimeError(
             f"LOG_LEVEL must be one of {sorted(allowed)}, got {value!r}"
         )
-    return normalized
+    return "WARNING" if normalized == "WARN" else normalized
 
 
 def _ensure_unique(names: tuple[str, ...], field_name: str) -> None:
