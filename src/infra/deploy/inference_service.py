@@ -219,10 +219,6 @@ def _validate_auth_mode() -> tuple[bool, str | None]:
     secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
 
     if use_iam:
-        if access_key or secret_key:
-            raise RuntimeError(
-                "Do not mix USE_IAM=true with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
-            )
         role_arn = os.getenv("KUBERAY_IAM_ROLE_ARN", "").strip() or None
         return True, role_arn
 
@@ -255,9 +251,7 @@ def load_deployment_settings() -> DeploymentSettings:
     return DeploymentSettings(
         namespace=_env_str("NAMESPACE", DEPLOYMENT_DEFAULTS["NAMESPACE"]),
         rayservice_name=_env_str("RAYSERVICE_NAME", DEPLOYMENT_DEFAULTS["RAYSERVICE_NAME"]),
-        service_account_name=_env_str(
-            "SERVICE_ACCOUNT_NAME", DEPLOYMENT_DEFAULTS["SERVICE_ACCOUNT_NAME"]
-        ),
+        service_account_name=_env_str("SERVICE_ACCOUNT_NAME", DEPLOYMENT_DEFAULTS["SERVICE_ACCOUNT_NAME"]),
         aws_secret_name=_env_str("AWS_SECRET_NAME", DEPLOYMENT_DEFAULTS["AWS_SECRET_NAME"]),
         ray_image=_env_str("RAY_IMAGE", DEPLOYMENT_DEFAULTS["RAY_IMAGE"]),
         ray_version=_env_str("RAY_VERSION", DEPLOYMENT_DEFAULTS["RAY_VERSION"]),
@@ -266,18 +260,10 @@ def load_deployment_settings() -> DeploymentSettings:
         worker_cpu=_env_str("WORKER_CPU", DEPLOYMENT_DEFAULTS["WORKER_CPU"]),
         worker_memory=_env_str("WORKER_MEMORY", DEPLOYMENT_DEFAULTS["WORKER_MEMORY"]),
         worker_replicas=_env_int("WORKER_REPLICAS", int(DEPLOYMENT_DEFAULTS["WORKER_REPLICAS"])),
-        worker_max_replicas=_env_int(
-            "WORKER_MAX_REPLICAS", int(DEPLOYMENT_DEFAULTS["WORKER_MAX_REPLICAS"])
-        ),
-        worker_ray_num_cpus=_env_str(
-            "WORKER_RAY_NUM_CPUS", DEPLOYMENT_DEFAULTS["WORKER_RAY_NUM_CPUS"]
-        ),
-        head_ray_num_cpus=_env_str(
-            "HEAD_RAY_NUM_CPUS", DEPLOYMENT_DEFAULTS["HEAD_RAY_NUM_CPUS"]
-        ),
-        model_cache_volume=_env_str(
-            "MODEL_CACHE_VOLUME", DEPLOYMENT_DEFAULTS["MODEL_CACHE_VOLUME"]
-        ),
+        worker_max_replicas=_env_int("WORKER_MAX_REPLICAS", int(DEPLOYMENT_DEFAULTS["WORKER_MAX_REPLICAS"])),
+        worker_ray_num_cpus=_env_str("WORKER_RAY_NUM_CPUS", DEPLOYMENT_DEFAULTS["WORKER_RAY_NUM_CPUS"]),
+        head_ray_num_cpus=_env_str("HEAD_RAY_NUM_CPUS", DEPLOYMENT_DEFAULTS["HEAD_RAY_NUM_CPUS"]),
+        model_cache_volume=_env_str("MODEL_CACHE_VOLUME", DEPLOYMENT_DEFAULTS["MODEL_CACHE_VOLUME"]),
         model_cache_dir=_env_str("MODEL_CACHE_DIR", DEPLOYMENT_DEFAULTS["MODEL_CACHE_DIR"]),
         run_as_user=_env_int("RUN_AS_USER", int(DEPLOYMENT_DEFAULTS["RUN_AS_USER"])),
         run_as_group=_env_int("RUN_AS_GROUP", int(DEPLOYMENT_DEFAULTS["RUN_AS_GROUP"])),
@@ -310,7 +296,12 @@ def _base_labels(settings: DeploymentSettings) -> dict[str, str]:
 def _secret_ref_env(name: str, secret_name: str) -> dict[str, Any]:
     return {
         "name": name,
-        "valueFrom": {"secretKeyRef": {"name": secret_name, "key": name}},
+        "valueFrom": {
+            "secretKeyRef": {
+                "name": secret_name,
+                "key": name,
+            }
+        },
     }
 
 
@@ -339,7 +330,9 @@ def _container_security_context() -> dict[str, Any]:
 
 def _probe(command: str, timeout: int, period: int, failure_threshold: int) -> dict[str, Any]:
     return {
-        "exec": {"command": ["/bin/bash", "-lc", command]},
+        "exec": {
+            "command": ["/bin/bash", "-lc", command],
+        },
         "initialDelaySeconds": 0,
         "timeoutSeconds": timeout,
         "periodSeconds": period,
@@ -348,7 +341,7 @@ def _probe(command: str, timeout: int, period: int, failure_threshold: int) -> d
     }
 
 
-def _python_json_probe(url: str, expected_key: str, expected_value: str, timeout: int) -> str:
+def _python_http_json_probe(url: str, expected_key: str, expected_value: str, timeout: int = 10) -> str:
     return textwrap.dedent(
         f"""
         python3 - <<'PY'
@@ -372,32 +365,36 @@ def _python_json_probe(url: str, expected_key: str, expected_value: str, timeout
     ).strip()
 
 
-def _health_probes_for_head() -> dict[str, Any]:
-    cmd = "ray health-check --address 127.0.0.1:6379 >/dev/null 2>&1"
+def _timeout_ray_health_cmd(address_expr: str, timeout_s: int = 10) -> str:
+    return f'timeout {timeout_s}s ray health-check --address "{address_expr}" >/dev/null 2>&1'
+
+
+def _head_probe_set() -> dict[str, Any]:
+    cmd = _timeout_ray_health_cmd("${RAY_ADDRESS}", timeout_s=10)
     return {
-        "startupProbe": _probe(cmd, timeout=30, period=5, failure_threshold=60),
-        "readinessProbe": _probe(cmd, timeout=15, period=5, failure_threshold=12),
-        "livenessProbe": _probe(cmd, timeout=15, period=10, failure_threshold=12),
+        "startupProbe": _probe(cmd, timeout=12, period=5, failure_threshold=60),
+        "readinessProbe": _probe(cmd, timeout=12, period=5, failure_threshold=12),
+        "livenessProbe": _probe(cmd, timeout=12, period=10, failure_threshold=12),
     }
 
 
-def _health_probes_for_worker() -> dict[str, Any]:
-    ray_cmd = "ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1"
-    app_cmd = _python_json_probe(
+def _worker_probe_set() -> dict[str, Any]:
+    ray_cmd = _timeout_ray_health_cmd("${RAY_ADDRESS}", timeout_s=10)
+    app_cmd = _python_http_json_probe(
         "http://127.0.0.1:8000/healthz",
         expected_key="status",
         expected_value="ok",
         timeout=10,
     )
     return {
-        "startupProbe": _probe(ray_cmd, timeout=30, period=5, failure_threshold=60),
+        "startupProbe": _probe(ray_cmd, timeout=12, period=5, failure_threshold=60),
         "readinessProbe": _probe(
             f"{ray_cmd} && {app_cmd}",
             timeout=20,
             period=5,
             failure_threshold=12,
         ),
-        "livenessProbe": _probe(ray_cmd, timeout=15, period=10, failure_threshold=12),
+        "livenessProbe": _probe(ray_cmd, timeout=12, period=10, failure_threshold=12),
     }
 
 
@@ -405,13 +402,17 @@ def build_namespace_doc(settings: DeploymentSettings) -> dict[str, Any]:
     return {
         "apiVersion": "v1",
         "kind": "Namespace",
-        "metadata": {"name": settings.namespace, "labels": _base_labels(settings)},
+        "metadata": {
+            "name": settings.namespace,
+            "labels": _base_labels(settings),
+        },
     }
 
 
 def build_service_account_doc(settings: DeploymentSettings) -> dict[str, Any] | None:
     if not settings.use_iam:
         return None
+
     role_arn = _require_nonempty(
         settings.irsa_role_arn,
         "KUBERAY_IAM_ROLE_ARN is required when USE_IAM=true",
@@ -423,7 +424,9 @@ def build_service_account_doc(settings: DeploymentSettings) -> dict[str, Any] | 
             "name": settings.service_account_name,
             "namespace": settings.namespace,
             "labels": _base_labels(settings),
-            "annotations": {"eks.amazonaws.com/role-arn": role_arn},
+            "annotations": {
+                "eks.amazonaws.com/role-arn": role_arn,
+            },
         },
     }
 
@@ -446,11 +449,14 @@ def build_secret_delete_doc(settings: DeploymentSettings) -> dict[str, Any]:
     return {
         "apiVersion": "v1",
         "kind": "Secret",
-        "metadata": {"name": settings.aws_secret_name, "namespace": settings.namespace},
+        "metadata": {
+            "name": settings.aws_secret_name,
+            "namespace": settings.namespace,
+        },
     }
 
 
-def _shared_volumes(settings: DeploymentSettings) -> list[dict[str, Any]]:
+def _shared_volumes() -> list[dict[str, Any]]:
     return [
         {"name": "model-cache", "emptyDir": {}},
         {"name": "tmp", "emptyDir": {}},
@@ -466,7 +472,9 @@ def _shared_mounts(settings: DeploymentSettings) -> list[dict[str, Any]]:
 
 def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) -> dict[str, Any]:
     labels = _base_labels(settings)
-    annotations = {AUTH_MODE_ANNOTATION: "iam" if settings.use_iam else "static"}
+    annotations = {
+        AUTH_MODE_ANNOTATION: "iam" if settings.use_iam else "static",
+    }
     container_env = _build_container_env(app_env, settings)
 
     pod_template_common = {
@@ -477,7 +485,7 @@ def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) 
             "fsGroup": settings.fs_group,
         },
         "terminationGracePeriodSeconds": 30,
-        "volumes": _shared_volumes(settings),
+        "volumes": _shared_volumes(),
     }
 
     head_container = {
@@ -486,12 +494,18 @@ def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) 
         "imagePullPolicy": "IfNotPresent",
         "securityContext": _container_security_context(),
         "resources": {
-            "requests": {"cpu": settings.head_cpu, "memory": settings.head_memory},
-            "limits": {"cpu": settings.head_cpu, "memory": settings.head_memory},
+            "requests": {
+                "cpu": settings.head_cpu,
+                "memory": settings.head_memory,
+            },
+            "limits": {
+                "cpu": settings.head_cpu,
+                "memory": settings.head_memory,
+            },
         },
         "volumeMounts": _shared_mounts(settings),
         "env": container_env,
-        **_health_probes_for_head(),
+        **_head_probe_set(),
     }
 
     worker_container = {
@@ -500,16 +514,29 @@ def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) 
         "imagePullPolicy": "IfNotPresent",
         "securityContext": _container_security_context(),
         "resources": {
-            "requests": {"cpu": settings.worker_cpu, "memory": settings.worker_memory},
-            "limits": {"cpu": settings.worker_cpu, "memory": settings.worker_memory},
+            "requests": {
+                "cpu": settings.worker_cpu,
+                "memory": settings.worker_memory,
+            },
+            "limits": {
+                "cpu": settings.worker_cpu,
+                "memory": settings.worker_memory,
+            },
         },
         "volumeMounts": _shared_mounts(settings),
         "env": container_env,
-        **_health_probes_for_worker(),
+        **_worker_probe_set(),
     }
 
-    head_template_spec: dict[str, Any] = {**pod_template_common, "containers": [head_container]}
-    worker_template_spec: dict[str, Any] = {**pod_template_common, "containers": [worker_container]}
+    head_template_spec: dict[str, Any] = {
+        **pod_template_common,
+        "containers": [head_container],
+    }
+    worker_template_spec: dict[str, Any] = {
+        **pod_template_common,
+        "containers": [worker_container],
+    }
+
     if settings.use_iam:
         head_template_spec["serviceAccountName"] = settings.service_account_name
         worker_template_spec["serviceAccountName"] = settings.service_account_name
@@ -542,7 +569,10 @@ def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) 
             "rayClusterConfig": {
                 "rayVersion": settings.ray_version,
                 "enableInTreeAutoscaling": True,
-                "autoscalerOptions": {"version": "v2", "idleTimeoutSeconds": 60},
+                "autoscalerOptions": {
+                    "version": "v2",
+                    "idleTimeoutSeconds": 60,
+                },
                 "headGroupSpec": {
                     "serviceType": "ClusterIP",
                     "rayStartParams": {
@@ -550,7 +580,9 @@ def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) 
                         "include-dashboard": "true",
                         "num-cpus": settings.head_ray_num_cpus,
                     },
-                    "template": {"spec": head_template_spec},
+                    "template": {
+                        "spec": head_template_spec,
+                    },
                 },
                 "workerGroupSpecs": [
                     {
@@ -558,8 +590,12 @@ def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) 
                         "replicas": settings.worker_replicas,
                         "minReplicas": 1,
                         "maxReplicas": settings.worker_max_replicas,
-                        "rayStartParams": {"num-cpus": settings.worker_ray_num_cpus},
-                        "template": {"spec": worker_template_spec},
+                        "rayStartParams": {
+                            "num-cpus": settings.worker_ray_num_cpus,
+                        },
+                        "template": {
+                            "spec": worker_template_spec,
+                        },
                     }
                 ],
             },
@@ -578,7 +614,12 @@ def build_documents(settings: DeploymentSettings, app_env: dict[str, str]) -> li
 
 
 def render_documents(docs: list[dict[str, Any]]) -> str:
-    return yaml.safe_dump_all(docs, sort_keys=False, default_flow_style=False, explicit_start=True)
+    return yaml.safe_dump_all(
+        docs,
+        sort_keys=False,
+        default_flow_style=False,
+        explicit_start=True,
+    )
 
 
 def sha256_text(text: str) -> str:

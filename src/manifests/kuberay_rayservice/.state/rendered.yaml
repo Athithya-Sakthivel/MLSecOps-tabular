@@ -167,9 +167,10 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address 127.0.0.1:6379 >/dev/null 2>&1
+                - timeout 10s ray health-check --address "${RAY_ADDRESS}" >/dev/null
+                  2>&1
               initialDelaySeconds: 0
-              timeoutSeconds: 30
+              timeoutSeconds: 12
               periodSeconds: 5
               failureThreshold: 60
               successThreshold: 1
@@ -178,9 +179,10 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address 127.0.0.1:6379 >/dev/null 2>&1
+                - timeout 10s ray health-check --address "${RAY_ADDRESS}" >/dev/null
+                  2>&1
               initialDelaySeconds: 0
-              timeoutSeconds: 15
+              timeoutSeconds: 12
               periodSeconds: 5
               failureThreshold: 12
               successThreshold: 1
@@ -189,9 +191,10 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address 127.0.0.1:6379 >/dev/null 2>&1
+                - timeout 10s ray health-check --address "${RAY_ADDRESS}" >/dev/null
+                  2>&1
               initialDelaySeconds: 0
-              timeoutSeconds: 15
+              timeoutSeconds: 12
               periodSeconds: 10
               failureThreshold: 12
               successThreshold: 1
@@ -235,9 +238,10 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1
+                - timeout 10s ray health-check --address "${RAY_ADDRESS}" >/dev/null
+                  2>&1
               initialDelaySeconds: 0
-              timeoutSeconds: 30
+              timeoutSeconds: 12
               periodSeconds: 5
               failureThreshold: 60
               successThreshold: 1
@@ -246,12 +250,12 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - "ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1 && python3\
-                  \ - <<'PY'\nimport json\nimport urllib.request\n\ntry:\n    with\
-                  \ urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=10)\
-                  \ as resp:\n        body = resp.read().decode(\"utf-8\", \"ignore\"\
-                  )\nexcept Exception:\n    raise SystemExit(1)\n\ntry:\n    payload\
-                  \ = json.loads(body)\nexcept Exception:\n    raise SystemExit(1)\n\
+                - "timeout 10s ray health-check --address \"${RAY_ADDRESS}\" >/dev/null\
+                  \ 2>&1 && python3 - <<'PY'\nimport json\nimport urllib.request\n\
+                  \ntry:\n    with urllib.request.urlopen('http://127.0.0.1:8000/healthz',\
+                  \ timeout=10) as resp:\n        body = resp.read().decode(\"utf-8\"\
+                  , \"ignore\")\nexcept Exception:\n    raise SystemExit(1)\n\ntry:\n\
+                  \    payload = json.loads(body)\nexcept Exception:\n    raise SystemExit(1)\n\
                   \nraise SystemExit(0 if payload.get('status') == 'ok' else 1)\n\
                   PY"
               initialDelaySeconds: 0
@@ -264,9 +268,10 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1
+                - timeout 10s ray health-check --address "${RAY_ADDRESS}" >/dev/null
+                  2>&1
               initialDelaySeconds: 0
-              timeoutSeconds: 15
+              timeoutSeconds: 12
               periodSeconds: 10
               failureThreshold: 12
               successThreshold: 1
