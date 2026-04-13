@@ -25,7 +25,7 @@ DEPLOYMENT_DEFAULTS: dict[str, str] = {
     "RAYSERVICE_NAME": "tabular-inference",
     "SERVICE_ACCOUNT_NAME": "ray-inference-sa",
     "AWS_SECRET_NAME": "aws-credentials",
-    "RAY_IMAGE": "ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-13-04-58--7d3aa0f@sha256:9e416db3e3eda0483bb726f017bc4efd7a87011175df017e96362c60102c2c23",
+    "RAY_IMAGE": "ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-13-04-17--4f51ecd@sha256:230fdf88cdcebf1063d5002346f54b158f30b1147196d62db409313a103a67a4",
     "RAY_VERSION": "2.54.1",
     "HEAD_CPU": "1",
     "HEAD_MEMORY": "3Gi",
@@ -310,12 +310,7 @@ def _base_labels(settings: DeploymentSettings) -> dict[str, str]:
 def _secret_ref_env(name: str, secret_name: str) -> dict[str, Any]:
     return {
         "name": name,
-        "valueFrom": {
-            "secretKeyRef": {
-                "name": secret_name,
-                "key": name,
-            }
-        },
+        "valueFrom": {"secretKeyRef": {"name": secret_name, "key": name}},
     }
 
 
@@ -338,14 +333,13 @@ def _container_security_context() -> dict[str, Any]:
     return {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True,
     }
 
 
 def _probe(command: str, timeout: int, period: int, failure_threshold: int) -> dict[str, Any]:
     return {
-        "exec": {
-            "command": ["/bin/bash", "-lc", command],
-        },
+        "exec": {"command": ["/bin/bash", "-lc", command]},
         "initialDelaySeconds": 0,
         "timeoutSeconds": timeout,
         "periodSeconds": period,
@@ -378,18 +372,18 @@ def _python_json_probe(url: str, expected_key: str, expected_value: str, timeout
     ).strip()
 
 
-def _head_probes() -> dict[str, Any]:
-    ray_cmd = "ray health-check --address 127.0.0.1:6379 >/dev/null 2>&1"
+def _health_probes_for_head() -> dict[str, Any]:
+    cmd = "ray health-check --address 127.0.0.1:6379 >/dev/null 2>&1"
     return {
-        "startupProbe": _probe(ray_cmd, timeout=30, period=5, failure_threshold=60),
-        "readinessProbe": _probe(ray_cmd, timeout=15, period=5, failure_threshold=12),
-        "livenessProbe": _probe(ray_cmd, timeout=15, period=10, failure_threshold=12),
+        "startupProbe": _probe(cmd, timeout=30, period=5, failure_threshold=60),
+        "readinessProbe": _probe(cmd, timeout=15, period=5, failure_threshold=12),
+        "livenessProbe": _probe(cmd, timeout=15, period=10, failure_threshold=12),
     }
 
 
-def _worker_probes() -> dict[str, Any]:
-    ray_cmd = 'ray health-check --address "${FQ_RAY_IP}:6379" >/dev/null 2>&1'
-    http_cmd = _python_json_probe(
+def _health_probes_for_worker() -> dict[str, Any]:
+    ray_cmd = "ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1"
+    app_cmd = _python_json_probe(
         "http://127.0.0.1:8000/healthz",
         expected_key="status",
         expected_value="ok",
@@ -398,7 +392,7 @@ def _worker_probes() -> dict[str, Any]:
     return {
         "startupProbe": _probe(ray_cmd, timeout=30, period=5, failure_threshold=60),
         "readinessProbe": _probe(
-            f"{ray_cmd} && {http_cmd}",
+            f"{ray_cmd} && {app_cmd}",
             timeout=20,
             period=5,
             failure_threshold=12,
@@ -411,17 +405,13 @@ def build_namespace_doc(settings: DeploymentSettings) -> dict[str, Any]:
     return {
         "apiVersion": "v1",
         "kind": "Namespace",
-        "metadata": {
-            "name": settings.namespace,
-            "labels": _base_labels(settings),
-        },
+        "metadata": {"name": settings.namespace, "labels": _base_labels(settings)},
     }
 
 
 def build_service_account_doc(settings: DeploymentSettings) -> dict[str, Any] | None:
     if not settings.use_iam:
         return None
-
     role_arn = _require_nonempty(
         settings.irsa_role_arn,
         "KUBERAY_IAM_ROLE_ARN is required when USE_IAM=true",
@@ -433,9 +423,7 @@ def build_service_account_doc(settings: DeploymentSettings) -> dict[str, Any] | 
             "name": settings.service_account_name,
             "namespace": settings.namespace,
             "labels": _base_labels(settings),
-            "annotations": {
-                "eks.amazonaws.com/role-arn": role_arn,
-            },
+            "annotations": {"eks.amazonaws.com/role-arn": role_arn},
         },
     }
 
@@ -458,21 +446,27 @@ def build_secret_delete_doc(settings: DeploymentSettings) -> dict[str, Any]:
     return {
         "apiVersion": "v1",
         "kind": "Secret",
-        "metadata": {
-            "name": settings.aws_secret_name,
-            "namespace": settings.namespace,
-        },
+        "metadata": {"name": settings.aws_secret_name, "namespace": settings.namespace},
     }
 
 
-def build_rayservice_doc(
-    settings: DeploymentSettings,
-    app_env: dict[str, str],
-) -> dict[str, Any]:
+def _shared_volumes(settings: DeploymentSettings) -> list[dict[str, Any]]:
+    return [
+        {"name": "model-cache", "emptyDir": {}},
+        {"name": "tmp", "emptyDir": {}},
+    ]
+
+
+def _shared_mounts(settings: DeploymentSettings) -> list[dict[str, Any]]:
+    return [
+        {"name": "model-cache", "mountPath": settings.model_cache_volume},
+        {"name": "tmp", "mountPath": "/tmp"},
+    ]
+
+
+def build_rayservice_doc(settings: DeploymentSettings, app_env: dict[str, str]) -> dict[str, Any]:
     labels = _base_labels(settings)
-    annotations = {
-        AUTH_MODE_ANNOTATION: "iam" if settings.use_iam else "static",
-    }
+    annotations = {AUTH_MODE_ANNOTATION: "iam" if settings.use_iam else "static"}
     container_env = _build_container_env(app_env, settings)
 
     pod_template_common = {
@@ -483,12 +477,7 @@ def build_rayservice_doc(
             "fsGroup": settings.fs_group,
         },
         "terminationGracePeriodSeconds": 30,
-        "volumes": [
-            {
-                "name": "model-cache",
-                "emptyDir": {},
-            }
-        ],
+        "volumes": _shared_volumes(settings),
     }
 
     head_container = {
@@ -497,23 +486,12 @@ def build_rayservice_doc(
         "imagePullPolicy": "IfNotPresent",
         "securityContext": _container_security_context(),
         "resources": {
-            "requests": {
-                "cpu": settings.head_cpu,
-                "memory": settings.head_memory,
-            },
-            "limits": {
-                "cpu": settings.head_cpu,
-                "memory": settings.head_memory,
-            },
+            "requests": {"cpu": settings.head_cpu, "memory": settings.head_memory},
+            "limits": {"cpu": settings.head_cpu, "memory": settings.head_memory},
         },
-        "volumeMounts": [
-            {
-                "name": "model-cache",
-                "mountPath": settings.model_cache_volume,
-            }
-        ],
+        "volumeMounts": _shared_mounts(settings),
         "env": container_env,
-        **_head_probes(),
+        **_health_probes_for_head(),
     }
 
     worker_container = {
@@ -522,45 +500,19 @@ def build_rayservice_doc(
         "imagePullPolicy": "IfNotPresent",
         "securityContext": _container_security_context(),
         "resources": {
-            "requests": {
-                "cpu": settings.worker_cpu,
-                "memory": settings.worker_memory,
-            },
-            "limits": {
-                "cpu": settings.worker_cpu,
-                "memory": settings.worker_memory,
-            },
+            "requests": {"cpu": settings.worker_cpu, "memory": settings.worker_memory},
+            "limits": {"cpu": settings.worker_cpu, "memory": settings.worker_memory},
         },
-        "volumeMounts": [
-            {
-                "name": "model-cache",
-                "mountPath": settings.model_cache_volume,
-            }
-        ],
+        "volumeMounts": _shared_mounts(settings),
         "env": container_env,
-        **_worker_probes(),
+        **_health_probes_for_worker(),
     }
 
+    head_template_spec: dict[str, Any] = {**pod_template_common, "containers": [head_container]}
+    worker_template_spec: dict[str, Any] = {**pod_template_common, "containers": [worker_container]}
     if settings.use_iam:
-        head_template_spec = {
-            **pod_template_common,
-            "serviceAccountName": settings.service_account_name,
-            "containers": [head_container],
-        }
-        worker_template_spec = {
-            **pod_template_common,
-            "serviceAccountName": settings.service_account_name,
-            "containers": [worker_container],
-        }
-    else:
-        head_template_spec = {
-            **pod_template_common,
-            "containers": [head_container],
-        }
-        worker_template_spec = {
-            **pod_template_common,
-            "containers": [worker_container],
-        }
+        head_template_spec["serviceAccountName"] = settings.service_account_name
+        worker_template_spec["serviceAccountName"] = settings.service_account_name
 
     serve_config_v2 = textwrap.dedent(
         """
@@ -590,10 +542,7 @@ def build_rayservice_doc(
             "rayClusterConfig": {
                 "rayVersion": settings.ray_version,
                 "enableInTreeAutoscaling": True,
-                "autoscalerOptions": {
-                    "version": "v2",
-                    "idleTimeoutSeconds": 60,
-                },
+                "autoscalerOptions": {"version": "v2", "idleTimeoutSeconds": 60},
                 "headGroupSpec": {
                     "serviceType": "ClusterIP",
                     "rayStartParams": {
@@ -601,9 +550,7 @@ def build_rayservice_doc(
                         "include-dashboard": "true",
                         "num-cpus": settings.head_ray_num_cpus,
                     },
-                    "template": {
-                        "spec": head_template_spec,
-                    },
+                    "template": {"spec": head_template_spec},
                 },
                 "workerGroupSpecs": [
                     {
@@ -611,12 +558,8 @@ def build_rayservice_doc(
                         "replicas": settings.worker_replicas,
                         "minReplicas": 1,
                         "maxReplicas": settings.worker_max_replicas,
-                        "rayStartParams": {
-                            "num-cpus": settings.worker_ray_num_cpus,
-                        },
-                        "template": {
-                            "spec": worker_template_spec,
-                        },
+                        "rayStartParams": {"num-cpus": settings.worker_ray_num_cpus},
+                        "template": {"spec": worker_template_spec},
                     }
                 ],
             },
@@ -627,22 +570,15 @@ def build_rayservice_doc(
 
 def build_documents(settings: DeploymentSettings, app_env: dict[str, str]) -> list[dict[str, Any]]:
     docs: list[dict[str, Any]] = [build_namespace_doc(settings)]
-
     sa_doc = build_service_account_doc(settings)
     if sa_doc is not None:
         docs.append(sa_doc)
-
     docs.append(build_rayservice_doc(settings, app_env))
     return docs
 
 
 def render_documents(docs: list[dict[str, Any]]) -> str:
-    return yaml.safe_dump_all(
-        docs,
-        sort_keys=False,
-        default_flow_style=False,
-        explicit_start=True,
-    )
+    return yaml.safe_dump_all(docs, sort_keys=False, default_flow_style=False, explicit_start=True)
 
 
 def sha256_text(text: str) -> str:
@@ -657,13 +593,6 @@ def write_state(rendered_yaml: str, digest: str) -> None:
     ensure_state_dir()
     RENDERED_PATH.write_text(rendered_yaml, encoding="utf-8")
     HASH_PATH.write_text(digest + "\n", encoding="utf-8")
-
-
-def read_previous_hash() -> str | None:
-    if not HASH_PATH.exists():
-        return None
-    value = HASH_PATH.read_text(encoding="utf-8").strip()
-    return value or None
 
 
 def write_temp_yaml(text: str) -> Path:
@@ -718,11 +647,6 @@ def rollout() -> int:
     rendered = render_documents(docs)
     digest = sha256_text(rendered)
 
-    previous = read_previous_hash()
-    if previous == digest and RENDERED_PATH.exists():
-        print(f"[OK] Manifest unchanged; hash={digest}")
-        return 0
-
     kubectl_apply_doc(docs[0])
     if secret_doc is not None:
         kubectl_apply_doc(secret_doc)
@@ -745,7 +669,6 @@ def rollout() -> int:
 
 def delete() -> int:
     settings = load_deployment_settings()
-
     namespace_doc = build_namespace_doc(settings)
     sa_doc = build_service_account_doc(settings)
     rayservice_doc: dict[str, Any] | None = None
@@ -754,18 +677,14 @@ def delete() -> int:
         rendered_yaml = RENDERED_PATH.read_text(encoding="utf-8")
         docs = list(yaml.safe_load_all(rendered_yaml))
         for doc in docs:
-            if not isinstance(doc, dict):
-                continue
-            if doc.get("kind") == "RayService":
+            if isinstance(doc, dict) and doc.get("kind") == "RayService":
                 rayservice_doc = doc
                 break
 
     if rayservice_doc is None:
         rayservice_doc = build_rayservice_doc(settings, load_app_env())
 
-    secret_doc = None
-    if not settings.use_iam:
-        secret_doc = build_secret_delete_doc(settings)
+    secret_doc = build_secret_delete_doc(settings) if not settings.use_iam else None
 
     kubectl_delete_doc(rayservice_doc)
     if sa_doc is not None:

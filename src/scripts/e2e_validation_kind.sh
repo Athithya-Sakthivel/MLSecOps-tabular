@@ -59,9 +59,6 @@ python3 src/infra/deploy/inference_service.py --rollout
 sleep 180
 kubectl get pods -A
 
-
-python3 src/infra/deploy/inference_service.py --delete
-
 HEAD_SVC=$(kubectl get svc -n inference -o name | grep 'head-svc$' | head -n1 | cut -d/ -f2)
 kubectl port-forward -n inference "svc/$HEAD_SVC" 8000:8000 >/tmp/pf.log 2>&1 &
 PF=$!

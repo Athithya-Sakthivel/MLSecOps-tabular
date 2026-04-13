@@ -45,6 +45,8 @@ spec:
           volumes: &id002
           - name: model-cache
             emptyDir: {}
+          - name: tmp
+            emptyDir: {}
           containers:
           - name: ray-head
             image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-13-04-58--7d3aa0f@sha256:9e416db3e3eda0483bb726f017bc4efd7a87011175df017e96362c60102c2c23
@@ -54,6 +56,7 @@ spec:
               capabilities:
                 drop:
                 - ALL
+              readOnlyRootFilesystem: true
             resources:
               requests:
                 cpu: '1'
@@ -64,6 +67,8 @@ spec:
             volumeMounts:
             - name: model-cache
               mountPath: /mlsecops
+            - name: tmp
+              mountPath: /tmp
             env: &id003
             - name: DEPLOYMENT_PROFILE
               value: prod
@@ -211,6 +216,7 @@ spec:
               capabilities:
                 drop:
                 - ALL
+              readOnlyRootFilesystem: true
             resources:
               requests:
                 cpu: '1'
@@ -221,13 +227,15 @@ spec:
             volumeMounts:
             - name: model-cache
               mountPath: /mlsecops
+            - name: tmp
+              mountPath: /tmp
             env: *id003
             startupProbe:
               exec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address "${FQ_RAY_IP}:6379" >/dev/null 2>&1
+                - ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1
               initialDelaySeconds: 0
               timeoutSeconds: 30
               periodSeconds: 5
@@ -238,12 +246,12 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - "ray health-check --address \"${FQ_RAY_IP}:6379\" >/dev/null 2>&1\
-                  \ && python3 - <<'PY'\nimport json\nimport urllib.request\n\ntry:\n\
-                  \    with urllib.request.urlopen('http://127.0.0.1:8000/healthz',\
-                  \ timeout=10) as resp:\n        body = resp.read().decode(\"utf-8\"\
-                  , \"ignore\")\nexcept Exception:\n    raise SystemExit(1)\n\ntry:\n\
-                  \    payload = json.loads(body)\nexcept Exception:\n    raise SystemExit(1)\n\
+                - "ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1 && python3\
+                  \ - <<'PY'\nimport json\nimport urllib.request\n\ntry:\n    with\
+                  \ urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=10)\
+                  \ as resp:\n        body = resp.read().decode(\"utf-8\", \"ignore\"\
+                  )\nexcept Exception:\n    raise SystemExit(1)\n\ntry:\n    payload\
+                  \ = json.loads(body)\nexcept Exception:\n    raise SystemExit(1)\n\
                   \nraise SystemExit(0 if payload.get('status') == 'ok' else 1)\n\
                   PY"
               initialDelaySeconds: 0
@@ -256,7 +264,7 @@ spec:
                 command:
                 - /bin/bash
                 - -lc
-                - ray health-check --address "${FQ_RAY_IP}:6379" >/dev/null 2>&1
+                - ray health-check --address 127.0.0.1:52365 >/dev/null 2>&1
               initialDelaySeconds: 0
               timeoutSeconds: 15
               periodSeconds: 10
