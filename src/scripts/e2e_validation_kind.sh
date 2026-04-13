@@ -54,9 +54,8 @@ export RAY_IMAGE=ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-13
 export USE_IAM=false
 
 
-python3 src/infra/deploy/inference_service.py --delete
 python3 src/infra/deploy/inference_service.py --rollout
-sleep 300
+
 kubectl get pods -A
 
 HEAD_SVC=$(kubectl get svc -n inference -o name | grep 'head-svc$' | head -n1 | cut -d/ -f2)

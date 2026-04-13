@@ -161,7 +161,7 @@ tmp.md
 artifacts
 
 signoz.io
-
+src/manifests/signoz
 # Environments
 .env
 .envrc
