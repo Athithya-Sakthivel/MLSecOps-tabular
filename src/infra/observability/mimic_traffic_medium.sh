@@ -17,7 +17,7 @@ readonly KEEP_ALIVE_SECONDS="${KEEP_ALIVE_SECONDS:-1800}"
 readonly STEP_TIMEOUT="${STEP_TIMEOUT:-30m}"
 readonly BOOTSTRAP_TIMEOUT="${BOOTSTRAP_TIMEOUT:-20m}"
 
-# App-layer rollout inputs. Every value can still be overridden from the shell.
+
 export MODEL_URI="${MODEL_URI:-s3://e2e-mlops-data-681802563986/model-artifacts/trip_eta_lgbm_v1/bceb2eb9-e373-4c44-91e5-abde147fec8b/2025-01-06}"
 export MODEL_VERSION="${MODEL_VERSION:-v1}"
 export MODEL_SHA256="${MODEL_SHA256:-29505278adb825a2f79812221b5d3a245145e140973d0354b74e278b50811976}"
@@ -26,22 +26,17 @@ export MODEL_OUTPUT_NAMES="${MODEL_OUTPUT_NAMES:-variable}"
 export FEATURE_ORDER="${FEATURE_ORDER:-pickup_hour,pickup_dow,pickup_month,pickup_is_weekend,pickup_borough_id,pickup_zone_id,pickup_service_zone_id,dropoff_borough_id,dropoff_zone_id,dropoff_service_zone_id,route_pair_id,avg_duration_7d_zone_hour,avg_fare_30d_zone,trip_count_90d_zone_hour}"
 export ALLOW_EXTRA_FEATURES="${ALLOW_EXTRA_FEATURES:-false}"
 export MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-/mlsecops/model-cache}"
-export LOG_LEVEL="${LOG_LEVEL:-INFO}"
-export RAY_IMAGE="${RAY_IMAGE:-ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-14-09-29--55b46d7@sha256:f46b83c48f3b392cf9016eb99f83775bbe0036f95c00a4c464acb55183aae00b}"
+export RAY_IMAGE="${RAY_IMAGE:-ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-15-06-12--b2617e3@sha256:3615562548755e906ad17945518267cfadbac7bdaacc5a76fc6ebd4dfbcfd6f4}"
 export USE_IAM="${USE_IAM:-false}"
 export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://signoz-otel-collector.signoz.svc.cluster.local:4317}"
-export SLOW_REQUEST_MS="${SLOW_REQUEST_MS:-1}"
 
-# Tracing:
-# - always_on => set OTEL_TRACES_SAMPLER=always_on and unset the arg
-# - otherwise => ratio sampler with numeric arg
-if [[ "${TRACE_ALWAYS_ON:-0}" == "1" ]]; then
-  export OTEL_TRACES_SAMPLER="always_on"
-  unset OTEL_TRACES_SAMPLER_ARG || true
-else
-  export OTEL_TRACES_SAMPLER="${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}"
-  export OTEL_TRACES_SAMPLER_ARG="${OTEL_TRACES_SAMPLER_ARG:-0.70}"
-fi
+
+# temprory dev override to get adequate telemtry
+export SLOW_REQUEST_MS="${SLOW_REQUEST_MS:-100}"
+export OTEL_TRACES_SAMPLER=parentbased_traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.7
+export LOG_LEVEL="${LOG_LEVEL:-INFO}"
+
 
 readonly DO_CLUSTER_BOOTSTRAP="${DO_CLUSTER_BOOTSTRAP:-1}"
 readonly DO_ROLLOUT="${DO_ROLLOUT:-1}"

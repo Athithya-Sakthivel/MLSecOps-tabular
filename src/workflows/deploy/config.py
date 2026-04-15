@@ -7,7 +7,7 @@ from typing import Literal
 
 DeploymentProfile = Literal["prod"]
 
-# Stable production defaults for this repo.
+# Stable production defaults
 PROD_DEFAULTS: dict[str, str] = {
     "SERVE_NUM_CPUS": "1.0",
     "SERVE_MIN_REPLICAS": "1",
@@ -26,10 +26,10 @@ PROD_DEFAULTS: dict[str, str] = {
     "ORT_INTRA_OP_NUM_THREADS": "1",
     "ORT_INTER_OP_NUM_THREADS": "1",
     "ORT_PROVIDERS": "CPUExecutionProvider",
-    "OTEL_TRACES_SAMPLER": "parentbased_always_on",
-    "LOG_LEVEL": "INFO",
+    "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+    "OTEL_TRACES_SAMPLER_ARG": "1.0",
+    "LOG_LEVEL": "WARNING",
 }
-
 
 def _profile() -> DeploymentProfile:
     raw = os.getenv("DEPLOYMENT_PROFILE", "prod").strip().lower()

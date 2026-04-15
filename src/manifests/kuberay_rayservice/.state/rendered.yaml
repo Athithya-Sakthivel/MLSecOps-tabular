@@ -49,7 +49,7 @@ spec:
             emptyDir: {}
           containers:
           - name: ray-head
-            image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-14-09-29--55b46d7@sha256:f46b83c48f3b392cf9016eb99f83775bbe0036f95c00a4c464acb55183aae00b
+            image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-15-06-12--b2617e3@sha256:3615562548755e906ad17945518267cfadbac7bdaacc5a76fc6ebd4dfbcfd6f4
             imagePullPolicy: IfNotPresent
             securityContext:
               allowPrivilegeEscalation: false
@@ -121,9 +121,9 @@ spec:
             - name: SERVE_BATCH_WAIT_TIMEOUT_S
               value: '0.005'
             - name: SERVE_HEALTH_CHECK_PERIOD_S
-              value: '10.0'
+              value: '20.0'
             - name: SERVE_HEALTH_CHECK_TIMEOUT_S
-              value: '30.0'
+              value: '40.0'
             - name: SERVE_GRACEFUL_SHUTDOWN_WAIT_LOOP_S
               value: '2.0'
             - name: SERVE_GRACEFUL_SHUTDOWN_TIMEOUT_S
@@ -142,14 +142,10 @@ spec:
               value: '15000'
             - name: OTEL_METRIC_EXPORT_TIMEOUT_MS
               value: '10000'
-            - name: OTEL_TRACES_SAMPLER
-              value: parentbased_traceidratio
-            - name: OTEL_TRACES_SAMPLER_ARG
-              value: '0.70'
             - name: LOG_LEVEL
-              value: INFO
+              value: WARNING
             - name: SLOW_REQUEST_MS
-              value: '1'
+              value: '100.0'
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -212,7 +208,7 @@ spec:
           volumes: *id002
           containers:
           - name: ray-worker
-            image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-14-09-29--55b46d7@sha256:f46b83c48f3b392cf9016eb99f83775bbe0036f95c00a4c464acb55183aae00b
+            image: ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-15-06-12--b2617e3@sha256:3615562548755e906ad17945518267cfadbac7bdaacc5a76fc6ebd4dfbcfd6f4
             imagePullPolicy: IfNotPresent
             securityContext:
               allowPrivilegeEscalation: false
@@ -223,10 +219,10 @@ spec:
             resources:
               requests:
                 cpu: '1'
-                memory: 3536Mi
+                memory: 2536Mi
               limits:
                 cpu: '1'
-                memory: 3536Mi
+                memory: 2536Mi
             volumeMounts:
             - name: model-cache
               mountPath: /mlsecops
