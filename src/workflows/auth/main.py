@@ -8,12 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-try:
-    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-except Exception:  # pragma: no cover
-    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
-    generate_latest = None  # type: ignore[assignment]
-
+import httpx
 from auth import (
     build_authorize_url,
     build_validate_payload,
@@ -35,12 +30,12 @@ from db import (
     create_pool,
     create_session,
     find_or_create_user,
-    get_active_session,
     get_session,
     init_schema,
     insert_auth_transaction,
     prune,
     revoke_session,
+    validate_session,
 )
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -48,6 +43,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.propagate import extract
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from settings import enabled_providers, get_settings, validate_url
+from telemetry import initialize_telemetry
 from ui import denied_page, login_page
 
 SETTINGS = get_settings()
@@ -231,10 +227,7 @@ async def _login_start(request: Request, provider: str, next_value: str, request
         )
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider)
-        logger.exception(
-            "provider_config_failed",
-            extra={"provider": provider, "request_id": request_id},
-        )
+        logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
         return _auth_error(
             "Login unavailable",
             "Could not initialize the selected provider.",
@@ -250,18 +243,29 @@ async def _login_start(request: Request, provider: str, next_value: str, request
     redirect_uri = callback_url(SETTINGS, provider)
     expires_at = datetime.now(UTC) + timedelta(seconds=AUTH_TX_TTL_SECONDS)
 
-    await insert_auth_transaction(
-        _pool(request),
-        state=state,
-        provider=provider,
-        code_verifier=verifier,
-        nonce=nonce,
-        redirect_uri=redirect_uri,
-        return_to=next_path,
-        expires_at=expires_at,
-        ip_addr=_client_ip(request),
-        user_agent=_user_agent(request),
-    )
+    try:
+        await insert_auth_transaction(
+            _pool(request),
+            state=state,
+            provider=provider,
+            code_verifier=verifier,
+            nonce=nonce,
+            redirect_uri=redirect_uri,
+            return_to=next_path,
+            expires_at=expires_at,
+            ip_addr=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
+    except Exception as exc:
+        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
+        logger.exception("auth_transaction_create_failed", extra={"provider": provider, "request_id": request_id})
+        return _auth_error(
+            "Login unavailable",
+            "Unable to create the login transaction.",
+            details=str(exc),
+            request_id=request_id,
+            status_code=503,
+        )
 
     _span_event("auth.login.start", request_id=request_id, provider=provider, return_to=next_path)
     response = _redirect(
@@ -301,10 +305,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         )
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider)
-        logger.exception(
-            "provider_config_failed",
-            extra={"provider": provider, "request_id": request_id},
-        )
+        logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
         return _auth_error(
             "Login unavailable",
             "Could not initialize the selected provider.",
@@ -392,12 +393,39 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _security_headers(response)
         return response
 
+    except httpx.TimeoutException as exc:
+        _span_error(exc, request_id=request_id, provider=provider, error_type="timeout")
+        logger.warning("provider_timeout", extra={"provider": provider, "request_id": request_id})
+        return _auth_error(
+            "Login unavailable",
+            "The identity provider timed out.",
+            details=str(exc),
+            request_id=request_id,
+            status_code=503,
+        )
+    except httpx.RequestError as exc:
+        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
+        logger.warning("provider_unreachable", extra={"provider": provider, "request_id": request_id})
+        return _auth_error(
+            "Login unavailable",
+            "The identity provider is unavailable.",
+            details=str(exc),
+            request_id=request_id,
+            status_code=503,
+        )
+    except httpx.HTTPStatusError as exc:
+        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
+        logger.warning("provider_http_error", extra={"provider": provider, "request_id": request_id})
+        return _auth_error(
+            "Login failed",
+            "The identity provider rejected the exchange.",
+            details=str(exc),
+            request_id=request_id,
+            status_code=502,
+        )
     except ValueError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.warning(
-            "login_failed",
-            extra={"provider": provider, "request_id": request_id, "error": str(exc)},
-        )
+        logger.warning("login_failed", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
         return _auth_error(
             "Login failed",
             "Authentication was rejected.",
@@ -407,10 +435,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         )
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.exception(
-            "callback_failed",
-            extra={"provider": provider, "request_id": request_id},
-        )
+        logger.exception("callback_failed", extra={"provider": provider, "request_id": request_id})
         return _auth_error(
             "Login failed",
             "The authentication flow could not be completed.",
@@ -425,7 +450,13 @@ async def _me(request: Request, request_id: str) -> Response:
     if not session_id:
         return _json({"error": "invalid_session"}, 401, request_id)
 
-    session = await get_session(_pool(request), session_id)
+    try:
+        session = await get_session(_pool(request), session_id)
+    except Exception as exc:
+        _span_error(exc, request_id=request_id, error_type=exc.__class__.__name__)
+        logger.exception("session_lookup_failed", extra={"request_id": request_id})
+        return _json({"error": "auth_service_unavailable"}, 503, request_id)
+
     if session is None:
         return _json({"error": "invalid_session"}, 401, request_id)
 
@@ -438,7 +469,13 @@ async def _validate(request: Request, request_id: str) -> Response:
     if not session_id:
         return _json({"error": "invalid_session"}, 401, request_id)
 
-    session = await get_active_session(_pool(request), session_id)
+    try:
+        session = await validate_session(_pool(request), session_id)
+    except Exception as exc:
+        _span_error(exc, request_id=request_id, error_type=exc.__class__.__name__)
+        logger.exception("session_validation_failed", extra={"request_id": request_id})
+        return _json({"error": "auth_service_unavailable"}, 503, request_id)
+
     if session is None:
         return _json({"error": "invalid_session"}, 401, request_id)
 
@@ -457,20 +494,32 @@ async def _logout(request: Request, request_id: str) -> Response:
     session_id = _resolve_session_id(request)
 
     if session_id:
-        session = await get_session(pool, session_id)
+        try:
+            session = await get_session(pool, session_id)
+        except Exception as exc:
+            _span_error(exc, request_id=request_id, error_type=exc.__class__.__name__)
+            logger.exception("logout_session_lookup_failed", extra={"request_id": request_id})
+            return _json({"error": "auth_service_unavailable"}, 503, request_id)
+
         if session is not None:
-            await revoke_session(pool, session_id)
-            await audit(
-                pool,
-                "logout",
-                provider=session.get("provider"),
-                user_id=session.get("user_id"),
-                session_id=session.get("id"),
-                subject=session.get("provider_sub"),
-                detail={},
-                ip_addr=_client_ip(request),
-                user_agent=_user_agent(request),
-            )
+            try:
+                await revoke_session(pool, session_id)
+                await audit(
+                    pool,
+                    "logout",
+                    provider=session.get("provider"),
+                    user_id=session.get("user_id"),
+                    session_id=session.get("id"),
+                    subject=session.get("provider_sub"),
+                    detail={},
+                    ip_addr=_client_ip(request),
+                    user_agent=_user_agent(request),
+                )
+            except Exception as exc:
+                _span_error(exc, request_id=request_id, error_type=exc.__class__.__name__)
+                logger.exception("logout_failed", extra={"request_id": request_id})
+                return _json({"error": "auth_service_unavailable"}, 503, request_id)
+
             _span_event(
                 "auth.logout",
                 request_id=request_id,
@@ -527,8 +576,6 @@ async def lifespan(app: FastAPI):
     prune_task: asyncio.Task[None] | None = None
 
     try:
-        from telemetry import initialize_telemetry
-
         telemetry = initialize_telemetry(SETTINGS)
 
         meter = metrics.get_meter("auth-service.http")
@@ -740,37 +787,6 @@ async def login_start(request: Request, provider: str):
 @app.get("/callback/{provider}")
 async def callback(request: Request, provider: str):
     return await _callback(request, provider, _request_id_from_state(request))
-
-
-@app.get("/metrics")
-async def metrics_endpoint(request: Request):
-    request_id = _request_id_from_state(request)
-    if not SETTINGS.metrics_enabled or generate_latest is None:
-        return Response(status_code=404, headers={REQ_ID_HEADER: request_id})
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
-        headers={REQ_ID_HEADER: request_id},
-    )
-
-
-@app.get("/debug/schema")
-async def debug_schema(request: Request):
-    request_id = _request_id_from_state(request)
-    if not SETTINGS.dev_mode:
-        return _json({"detail": "Not found"}, 404, request_id)
-    return _json(
-        {
-            "users": True,
-            "external_identities": True,
-            "auth_transactions": True,
-            "app_sessions": True,
-            "audit_events": True,
-            "validate_route": validate_url(SETTINGS),
-        },
-        200,
-        request_id,
-    )
 
 
 if __name__ == "__main__":

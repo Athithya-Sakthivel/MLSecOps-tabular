@@ -164,6 +164,11 @@ python3 -m venv .venv_deploy
 .venv_deploy/bin/python -m pip install --upgrade pip wheel setuptools
 .venv_deploy/bin/python -m pip install -r src/workflows/deploy/requirements.txt
 
+python3 -m venv .venv_auth
+.venv_auth/bin/python -m pip install --upgrade pip wheel setuptools
+.venv_auth/bin/python -m pip install -r src/workflows/auth/requirements.txt
+
+
 log "installing Python packages"
 python3 -m pip install --no-cache-dir --break-system-packages \
   pyarrow==23.0.1 \

@@ -8,6 +8,7 @@ exclude = [
   ".venv_train_dev",
   ".venv_deploy",
   ".repo",
+  ".venv_auth",
   "__pycache__",
   "ELT",
 ]

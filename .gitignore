@@ -38,7 +38,7 @@ src/terraform/cloudflare/terraform.tfstate.backup
 src/terraform/cloudflare/tfplan
 src/terraform/cloudflare/.terraform.tfstate.lock.info
 
-
+.venv_auth
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
