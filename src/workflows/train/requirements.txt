@@ -64,7 +64,7 @@ gunicorn==25.3.0
 h11==0.16.0
 huey==2.6.0
 idna==3.11
-importlib_metadata==8.7.1
+importlib_metadata==9.0.0
 isodate==0.7.2
 itsdangerous==2.2.0
 jaraco.classes==3.4.0
