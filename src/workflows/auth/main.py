@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import httpx
 from auth import (
     build_authorize_url,
     build_validate_payload,
@@ -43,6 +42,7 @@ from opentelemetry import metrics, trace
 from opentelemetry.propagate import extract
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from settings import enabled_providers, get_settings, validate_url
+from starlette.types import ASGIApp, Receive, Scope, Send
 from telemetry import initialize_telemetry
 from ui import denied_page, login_page
 
@@ -55,6 +55,34 @@ SESSION_COOKIE_NAME = SETTINGS.session_cookie_name
 SESSION_TTL_SECONDS = SETTINGS.session_ttl_seconds
 AUTH_TX_TTL_SECONDS = SETTINGS.auth_tx_ttl_seconds
 REQ_ID_HEADER = "X-Request-Id"
+
+
+class RequestIdMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        raw_headers = scope.get("headers", [])
+        request_headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in raw_headers
+        }
+        request_id = (request_headers.get("x-request-id") or uuid.uuid4().hex).strip() or uuid.uuid4().hex
+        scope.setdefault("state", {})["request_id"] = request_id
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                if not any(key.lower() == b"x-request-id" for key, _ in headers):
+                    headers.append((REQ_ID_HEADER.encode("latin-1"), request_id.encode("latin-1")))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 def _route_key(path: str) -> str:
@@ -393,46 +421,6 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _security_headers(response)
         return response
 
-    except httpx.TimeoutException as exc:
-        _span_error(exc, request_id=request_id, provider=provider, error_type="timeout")
-        logger.warning("provider_timeout", extra={"provider": provider, "request_id": request_id})
-        return _auth_error(
-            "Login unavailable",
-            "The identity provider timed out.",
-            details=str(exc),
-            request_id=request_id,
-            status_code=503,
-        )
-    except httpx.RequestError as exc:
-        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.warning("provider_unreachable", extra={"provider": provider, "request_id": request_id})
-        return _auth_error(
-            "Login unavailable",
-            "The identity provider is unavailable.",
-            details=str(exc),
-            request_id=request_id,
-            status_code=503,
-        )
-    except httpx.HTTPStatusError as exc:
-        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.warning("provider_http_error", extra={"provider": provider, "request_id": request_id})
-        return _auth_error(
-            "Login failed",
-            "The identity provider rejected the exchange.",
-            details=str(exc),
-            request_id=request_id,
-            status_code=502,
-        )
-    except ValueError as exc:
-        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.warning("login_failed", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
-        return _auth_error(
-            "Login failed",
-            "Authentication was rejected.",
-            details=str(exc),
-            request_id=request_id,
-            status_code=403,
-        )
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("callback_failed", extra={"provider": provider, "request_id": request_id})
@@ -658,11 +646,12 @@ app = FastAPI(
     docs_url=None if not SETTINGS.dev_mode else "/docs",
     redoc_url=None if not SETTINGS.dev_mode else "/redoc",
 )
+app.add_middleware(RequestIdMiddleware)
 
 
 @app.middleware("http")
-async def middleware(request: Request, call_next):
-    request_id = _request_id(request)
+async def observability_middleware(request: Request, call_next):
+    request_id = _request_id_from_state(request)
     request.state.request_id = request_id
 
     route = _route_key(request.url.path)
@@ -787,6 +776,21 @@ async def login_start(request: Request, provider: str):
 @app.get("/callback/{provider}")
 async def callback(request: Request, provider: str):
     return await _callback(request, provider, _request_id_from_state(request))
+
+
+@app.get("/metrics")
+async def metrics_endpoint(request: Request):
+    request_id = _request_id_from_state(request)
+    try:
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    except Exception:
+        return Response(status_code=404, headers={REQ_ID_HEADER: request_id})
+
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+        headers={REQ_ID_HEADER: request_id},
+    )
 
 
 if __name__ == "__main__":

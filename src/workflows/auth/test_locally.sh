@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 AUTH_DIR="${ROOT_DIR}/src/workflows/auth"
@@ -11,28 +11,34 @@ BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
 REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-10}"
 READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-180}"
 
-APP_LOG="${APP_LOG:-${ROOT_DIR}/.auth-local.log}"
-PG_LOG="${PG_LOG:-${ROOT_DIR}/.auth-postgres.log}"
-PG_DATA_DIR="${PG_DATA_DIR:-$(mktemp -d /tmp/auth-pgdata-XXXXXX)}"
+PG_MODE="${PG_MODE:-docker}"   # docker|external
+PG_PORT="${PG_PORT:-55432}"
+PG_CONTAINER_NAME="${PG_CONTAINER_NAME:-auth-postgres-local}"
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18}"
 
-OTEL_COLLECTOR_IMAGE="${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector:0.149.0}"
+OTEL_COLLECTOR_IMAGE="${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector-contrib:0.149.0}"
 OTEL_COLLECTOR_CONTAINER_NAME="${OTEL_COLLECTOR_CONTAINER_NAME:-auth-otel-local}"
 OTEL_COLLECTOR_CONFIG_DIR="$(mktemp -d /tmp/auth-otel-XXXXXX)"
 COLLECTOR_GRPC_PORT="${COLLECTOR_GRPC_PORT:-4317}"
 COLLECTOR_HTTP_PORT="${COLLECTOR_HTTP_PORT:-4318}"
-
-PG_MODE="${PG_MODE:-auto}"  # auto|local|docker|external
-PG_PORT="${PG_PORT:-55432}"
-PG_CONTAINER_NAME="${PG_CONTAINER_NAME:-auth-postgres-local}"
-POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16}"
+COLLECTOR_HEALTH_PORT="${COLLECTOR_HEALTH_PORT:-13133}"
 
 SESSION_COOKIE_NAME="${SESSION_COOKIE_NAME:-auth_session}"
 
-PYTHON_BIN="${PYTHON_BIN:-}"
-if [[ -z "${PYTHON_BIN}" ]]; then
-  PYTHON_BIN="$(command -v python3 || command -v python || true)"
+if [[ -f "${ROOT_DIR}/.venv_auth/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.venv_auth/bin/activate"
 fi
-[[ -n "${PYTHON_BIN}" ]] || { echo "ERROR: python3 is required"; exit 1; }
+
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
+[[ -n "${PYTHON_BIN}" ]] || { echo "ERROR: python3 is required" >&2; exit 1; }
+
+command -v docker >/dev/null 2>&1 || { echo "ERROR: docker is required" >&2; exit 1; }
+
+if [[ "${POSTGRES_IMAGE}" == *"cloudnative-pg"* ]]; then
+  echo "WARN: CNPG image detected for local testing; falling back to postgres:18." >&2
+  POSTGRES_IMAGE="postgres:18"
+fi
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${AUTH_DIR}:${PYTHONPATH:-}"
@@ -79,21 +85,22 @@ export OTEL_TRACES_SAMPLER_ARG="${OTEL_TRACES_SAMPLER_ARG:-1.0}"
 export OTEL_TIMEOUT_SECONDS="${OTEL_TIMEOUT_SECONDS:-10.0}"
 export OTEL_METRIC_EXPORT_INTERVAL_MS="${OTEL_METRIC_EXPORT_INTERVAL_MS:-5000}"
 export OTEL_METRIC_EXPORT_TIMEOUT_MS="${OTEL_METRIC_EXPORT_TIMEOUT_MS:-3000}"
+export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:${COLLECTOR_GRPC_PORT}}"
 
-if [[ -z "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ]]; then
-  export OTEL_EXPORTER_OTLP_ENDPOINT="127.0.0.1:${COLLECTOR_GRPC_PORT}"
-fi
-
-mkdir -p "${PG_DATA_DIR}"
-: > "${APP_LOG}"
-: > "${PG_LOG}"
-
-have_cmd() {
-  command -v "$1" >/dev/null 2>&1
+section() {
+  printf '\n\033[1;36m==> %s\033[0m\n' "$1"
 }
 
-die() {
-  echo "ERROR: $*" >&2
+info() {
+  printf '\033[1;32m%s\033[0m\n' "$1"
+}
+
+warn() {
+  printf '\033[1;33m%s\033[0m\n' "$1" >&2
+}
+
+fail() {
+  printf '\033[1;31mERROR:\033[0m %s\n' "$1" >&2
   exit 1
 }
 
@@ -173,193 +180,66 @@ raise SystemExit(f"Timed out waiting for {url}: {last_error}")
 PY
 }
 
-request_json() {
-  local method="$1"
-  local path="$2"
-  local payload_json="${3:-}"
-  local headers_json="${4:-{}}"
+wait_for_postgres_ready() {
+  local dsn="$1"
+  local timeout_s="$2"
 
-  "${PYTHON_BIN}" - "$BASE_URL" "$method" "$path" "$payload_json" "$headers_json" "$REQUEST_TIMEOUT_SECONDS" <<'PY'
+  "${PYTHON_BIN}" - "$dsn" "$timeout_s" <<'PY'
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+
+import asyncpg
+
+dsn = sys.argv[1]
+timeout_s = int(sys.argv[2])
+
+async def main() -> None:
+    deadline = time.time() + timeout_s
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            conn = await asyncpg.connect(dsn=dsn, timeout=5)
+            try:
+                await conn.execute("SELECT 1")
+            finally:
+                await conn.close()
+            return
+        except Exception as exc:
+            last_error = str(exc)
+            await asyncio.sleep(1)
+    raise SystemExit(f"Timed out waiting for PostgreSQL readiness: {last_error}")
+
+asyncio.run(main())
+PY
+}
+
+header_ci() {
+  local key="$1"
+  local headers_json="$2"
+  "${PYTHON_BIN}" - "$key" "$headers_json" <<'PY'
 from __future__ import annotations
 
 import json
 import sys
-import urllib.error
-import urllib.request
 
-base_url = sys.argv[1].rstrip("/")
-method = sys.argv[2]
-path = sys.argv[3]
-payload_raw = sys.argv[4]
-headers_raw = sys.argv[5]
-request_timeout = float(sys.argv[6])
+needle = sys.argv[1].lower()
+headers = json.loads(sys.argv[2])
 
-headers = json.loads(headers_raw)
-data = None
-if payload_raw:
-    data = json.dumps(json.loads(payload_raw)).encode("utf-8")
-    headers.setdefault("Content-Type", "application/json")
-
-req = urllib.request.Request(
-    f"{base_url}{path}",
-    data=data,
-    headers=headers,
-    method=method,
-)
-
-try:
-    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-        print(json.dumps(
-            {
-                "status": resp.status,
-                "headers": dict(resp.headers.items()),
-                "body": raw,
-            },
-            ensure_ascii=False,
-        ))
-except urllib.error.HTTPError as exc:
-    raw = exc.read().decode("utf-8", errors="replace")
-    print(json.dumps(
-        {
-            "status": exc.code,
-            "headers": dict(exc.headers.items()),
-            "body": raw,
-        },
-        ensure_ascii=False,
-    ))
+for k, v in headers.items():
+    if k.lower() == needle:
+        print(v)
+        break
 PY
 }
 
-start_collector() {
-  if [[ -n "${SKIP_OTEL_COLLECTOR:-}" ]]; then
-    echo "Skipping OTEL collector startup (SKIP_OTEL_COLLECTOR set)."
-    return
-  fi
-
-  have_cmd docker || die "docker is required unless SKIP_OTEL_COLLECTOR=1 and OTEL_EXPORTER_OTLP_ENDPOINT points to an existing collector"
-
-  cat >"${OTEL_COLLECTOR_CONFIG_DIR}/config.yaml" <<EOF
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:${COLLECTOR_GRPC_PORT}
-      http:
-        endpoint: 0.0.0.0:${COLLECTOR_HTTP_PORT}
-
-processors:
-  batch: {}
-
-exporters:
-  debug:
-    verbosity: detailed
-
-service:
-  pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
-    metrics:
-      receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
-    logs:
-      receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
-EOF
-
-  docker rm -f "${OTEL_COLLECTOR_CONTAINER_NAME}" >/dev/null 2>&1 || true
-  docker run -d \
-    --name "${OTEL_COLLECTOR_CONTAINER_NAME}" \
-    -p "127.0.0.1:${COLLECTOR_GRPC_PORT}:4317" \
-    -p "127.0.0.1:${COLLECTOR_HTTP_PORT}:4318" \
-    -v "${OTEL_COLLECTOR_CONFIG_DIR}:/etc/otelcol:ro" \
-    "${OTEL_COLLECTOR_IMAGE}" \
-    --config=/etc/otelcol/config.yaml >/dev/null
-
-  wait_for_port 127.0.0.1 "${COLLECTOR_GRPC_PORT}" 30
-}
-
-start_local_postgres() {
-  have_cmd initdb || return 1
-  have_cmd pg_ctl || return 1
-  have_cmd createdb || return 1
-
-  rm -rf "${PG_DATA_DIR:?}/"*
-  initdb -D "${PG_DATA_DIR}" --auth=trust --username=postgres --encoding=UTF8 >/dev/null
-  pg_ctl -D "${PG_DATA_DIR}" -l "${PG_LOG}" -o "-h 127.0.0.1 -p ${PG_PORT}" start >/dev/null
-  wait_for_port 127.0.0.1 "${PG_PORT}" 30
-  createdb -h 127.0.0.1 -p "${PG_PORT}" -U postgres auth >/dev/null 2>&1 || true
-  export POSTGRES_DSN="postgresql://postgres@127.0.0.1:${PG_PORT}/auth"
-}
-
-start_docker_postgres() {
-  have_cmd docker || return 1
-
-  docker rm -f "${PG_CONTAINER_NAME}" >/dev/null 2>&1 || true
-  docker run -d \
-    --name "${PG_CONTAINER_NAME}" \
-    -e POSTGRES_DB=auth \
-    -e POSTGRES_USER=postgres \
-    -e POSTGRES_HOST_AUTH_METHOD=trust \
-    -p "127.0.0.1:${PG_PORT}:5432" \
-    "${POSTGRES_IMAGE}" >/dev/null
-
-  wait_for_port 127.0.0.1 "${PG_PORT}" 60
-  export POSTGRES_DSN="postgresql://postgres@127.0.0.1:${PG_PORT}/auth"
-}
-
-start_postgres() {
-  if [[ -n "${POSTGRES_DSN:-}" && "${PG_MODE}" == "external" ]]; then
-    echo "Using external POSTGRES_DSN=${POSTGRES_DSN}"
-    return
-  fi
-
-  if [[ -n "${POSTGRES_DSN:-}" && "${PG_MODE}" == "auto" && "${POSTGRES_DSN}" != "postgresql://postgres:postgres@postgres:5432/auth" ]]; then
-    echo "Using existing POSTGRES_DSN=${POSTGRES_DSN}"
-    return
-  fi
-
-  case "${PG_MODE}" in
-    external)
-      [[ -n "${POSTGRES_DSN:-}" ]] || die "PG_MODE=external requires POSTGRES_DSN to be set"
-      ;;
-    local)
-      start_local_postgres || die "local PostgreSQL tooling not available (initdb/pg_ctl/createdb)"
-      PG_LOCAL_STARTED=1
-      ;;
-    docker)
-      start_docker_postgres || die "docker PostgreSQL startup failed"
-      PG_CONTAINER_STARTED=1
-      ;;
-    auto)
-      if start_local_postgres; then
-        PG_LOCAL_STARTED=1
-        echo "Started local PostgreSQL from host binaries."
-      else
-        echo "Local PostgreSQL binaries unavailable; falling back to docker."
-        start_docker_postgres || die "docker PostgreSQL startup failed"
-        PG_CONTAINER_STARTED=1
-      fi
-      ;;
-    *)
-      die "PG_MODE must be one of: auto, local, docker, external"
-      ;;
-  esac
-}
-
-start_auth_app() {
-  cd "${AUTH_DIR}"
-  "${PYTHON_BIN}" -m uvicorn main:app \
-    --host "${HOST}" \
-    --port "${PORT}" \
-    --log-level "${LOG_LEVEL,,}" \
-    >"${APP_LOG}" 2>&1 &
-  SERVICE_PID=$!
-  cd "${ROOT_DIR}"
+docker_logs_tail() {
+  local name="$1"
+  printf '\n----- docker logs: %s -----\n' "$name"
+  docker logs --tail 200 "$name" 2>&1 || true
+  printf '----- end docker logs: %s -----\n\n'
 }
 
 cleanup() {
@@ -371,57 +251,164 @@ cleanup() {
     wait "${SERVICE_PID}" >/dev/null 2>&1 || true
   fi
 
-  if [[ -n "${PG_CONTAINER_STARTED:-}" ]]; then
-    docker rm -f "${PG_CONTAINER_NAME}" >/dev/null 2>&1 || true
-  fi
-
-  if [[ -n "${OTEL_COLLECTOR_STARTED:-}" ]]; then
-    docker rm -f "${OTEL_COLLECTOR_CONTAINER_NAME}" >/dev/null 2>&1 || true
-  fi
-
-  if [[ -n "${PG_LOCAL_STARTED:-}" ]]; then
-    pg_ctl -D "${PG_DATA_DIR}" stop -m fast >/dev/null 2>&1 || true
-  fi
+  docker rm -f "${PG_CONTAINER_NAME}" >/dev/null 2>&1 || true
+  docker rm -f "${OTEL_COLLECTOR_CONTAINER_NAME}" >/dev/null 2>&1 || true
 
   rm -rf "${OTEL_COLLECTOR_CONFIG_DIR}" >/dev/null 2>&1 || true
-  rm -rf "${PG_DATA_DIR}" >/dev/null 2>&1 || true
-
   exit "${exit_code}"
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting OTEL collector..."
-if [[ -z "${SKIP_OTEL_COLLECTOR:-}" ]]; then
-  start_collector
-  OTEL_COLLECTOR_STARTED=1
+section "Environment"
+info "ROOT_DIR=${ROOT_DIR}"
+info "AUTH_DIR=${AUTH_DIR}"
+info "BASE_URL=${BASE_URL}"
+info "POSTGRES_IMAGE=${POSTGRES_IMAGE}"
+info "POSTGRES_DSN=${POSTGRES_DSN:-<unset>}"
+info "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}"
+
+section "Starting OTEL collector"
+
+cat >"${OTEL_COLLECTOR_CONFIG_DIR}/config.yaml" <<EOF
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: normal
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+EOF
+
+docker rm -f "${OTEL_COLLECTOR_CONTAINER_NAME}" >/dev/null 2>&1 || true
+docker run -d \
+  --name "${OTEL_COLLECTOR_CONTAINER_NAME}" \
+  -p "127.0.0.1:${COLLECTOR_GRPC_PORT}:4317" \
+  -p "127.0.0.1:${COLLECTOR_HTTP_PORT}:4318" \
+  -p "127.0.0.1:${COLLECTOR_HEALTH_PORT}:13133" \
+  -v "${OTEL_COLLECTOR_CONFIG_DIR}:/etc/otelcol:ro" \
+  "${OTEL_COLLECTOR_IMAGE}" \
+  --config=/etc/otelcol/config.yaml >/dev/null
+
+wait_for_port 127.0.0.1 "${COLLECTOR_GRPC_PORT}" 30
+wait_for_http_200 "http://127.0.0.1:${COLLECTOR_HEALTH_PORT}/" 30
+
+section "Starting PostgreSQL"
+
+if [[ "${PG_MODE}" == "external" ]]; then
+  [[ -n "${POSTGRES_DSN:-}" ]] || fail "PG_MODE=external requires POSTGRES_DSN to be set"
+  info "Using external POSTGRES_DSN=${POSTGRES_DSN}"
+  wait_for_postgres_ready "${POSTGRES_DSN}" "${READY_TIMEOUT_SECONDS}"
+else
+  docker rm -f "${PG_CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+  docker run -d \
+    --name "${PG_CONTAINER_NAME}" \
+    -e POSTGRES_USER=postgres \
+    -e POSTGRES_PASSWORD=postgres \
+    -e POSTGRES_DB=auth \
+    -p "127.0.0.1:${PG_PORT}:5432" \
+    --health-cmd='pg_isready -U postgres -d auth' \
+    --health-interval=3s \
+    --health-timeout=3s \
+    --health-retries=30 \
+    "${POSTGRES_IMAGE}" >/dev/null
+
+  export POSTGRES_DSN="${POSTGRES_DSN:-postgresql://postgres:postgres@127.0.0.1:${PG_PORT}/auth}"
+
+  info "Waiting for container health"
+  "${PYTHON_BIN}" - "${PG_CONTAINER_NAME}" "${READY_TIMEOUT_SECONDS}" <<'PY'
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+
+name = sys.argv[1]
+timeout_s = int(sys.argv[2])
+
+deadline = time.time() + timeout_s
+last_status = ""
+
+while time.time() < deadline:
+    try:
+        raw = subprocess.check_output(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}",
+                name,
+            ],
+            text=True,
+        ).strip()
+        last_status = raw
+        if raw in {"healthy", "no-healthcheck"}:
+            sys.exit(0)
+    except Exception as exc:
+        last_status = str(exc)
+    time.sleep(1)
+
+raise SystemExit(f"Timed out waiting for docker health on {name}: {last_status}")
+PY
+
+  info "Waiting for database connections"
+  if ! wait_for_postgres_ready "${POSTGRES_DSN}" "${READY_TIMEOUT_SECONDS}"; then
+    docker_logs_tail "${PG_CONTAINER_NAME}"
+    fail "PostgreSQL was not accepting connections"
+  fi
+
+  info "PostgreSQL is ready at ${POSTGRES_DSN}"
 fi
 
-echo "Starting PostgreSQL..."
-start_postgres
+section "Starting auth service"
+cd "${AUTH_DIR}"
+"${PYTHON_BIN}" -m uvicorn main:app \
+  --host "${HOST}" \
+  --port "${PORT}" \
+  --log-level "${LOG_LEVEL,,}" &
+SERVICE_PID=$!
+cd "${ROOT_DIR}"
+info "Auth service PID: ${SERVICE_PID}"
 
-echo "Starting auth service..."
-start_auth_app
-
-echo "Waiting for readiness..."
+section "Waiting for auth readiness"
 wait_for_http_200 "${BASE_URL}/readyz" "${READY_TIMEOUT_SECONDS}"
 
-echo "Running local E2E checks..."
+section "Local E2E checks"
 "${PYTHON_BIN}" - "${BASE_URL}" "${POSTGRES_DSN}" "${SESSION_COOKIE_NAME}" "${REQUEST_TIMEOUT_SECONDS}" <<'PY'
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
 import uuid
 
-try:
-    import asyncpg
-except Exception as exc:
-    raise SystemExit(f"asyncpg is required for this test harness: {exc!r}") from exc
+import asyncpg
 
 base_url = sys.argv[1].rstrip("/")
 postgres_dsn = sys.argv[2]
@@ -447,26 +434,18 @@ def get_json(path: str):
     status, headers, raw = request("GET", path)
     if status < 200 or status >= 300:
         raise RuntimeError(f"GET {path} failed: HTTP {status} {raw}")
-    try:
-        return json.loads(raw), headers
-    except Exception as exc:
-        raise RuntimeError(f"GET {path} returned invalid JSON: {raw}") from exc
-
-def post_json(path: str, payload: dict[str, object], *, headers: dict[str, str] | None = None):
-    body = json.dumps(payload).encode("utf-8")
-    req_headers = {"Content-Type": "application/json"}
-    if headers:
-        req_headers.update(headers)
-    status, resp_headers, raw = request("POST", path, headers=req_headers, body=body)
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        parsed = raw
-    return status, resp_headers, parsed
+    return json.loads(raw), headers
 
 def assert_ok(cond: bool, msg: str):
     if not cond:
         raise RuntimeError(msg)
+
+def get_header(headers: dict[str, str], name: str) -> str | None:
+    needle = name.lower()
+    for key, value in headers.items():
+        if key.lower() == needle:
+            return value
+    return None
 
 async def seed_session() -> tuple[str, str]:
     conn = await asyncpg.connect(postgres_dsn)
@@ -518,8 +497,8 @@ root, root_headers = get_json("/")
 assert_ok(health.get("status") == "ok", f"unexpected /healthz payload: {health}")
 assert_ok(ready.get("status") == "ok", f"unexpected /readyz payload: {ready}")
 assert_ok(root.get("status") == "ok", f"unexpected / payload: {root}")
-assert_ok(health_headers.get("X-Request-Id"), "missing X-Request-Id on /healthz")
-assert_ok(ready_headers.get("X-Request-Id"), "missing X-Request-Id on /readyz")
+assert_ok(get_header(health_headers, "X-Request-Id"), "missing X-Request-Id on /healthz")
+assert_ok(get_header(ready_headers, "X-Request-Id"), "missing X-Request-Id on /readyz")
 
 status, _, raw = request("GET", "/validate")
 assert_ok(status == 401, f"/validate without session must be 401, got {status}: {raw}")
@@ -569,5 +548,5 @@ print(json.dumps(
 ))
 PY
 
-echo "E2E auth checks passed."
-echo "App log: ${APP_LOG}"
+section "Done"
+info "E2E auth checks passed."

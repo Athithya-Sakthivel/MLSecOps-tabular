@@ -26,7 +26,7 @@ export MODEL_OUTPUT_NAMES="${MODEL_OUTPUT_NAMES:-variable}"
 export FEATURE_ORDER="${FEATURE_ORDER:-pickup_hour,pickup_dow,pickup_month,pickup_is_weekend,pickup_borough_id,pickup_zone_id,pickup_service_zone_id,dropoff_borough_id,dropoff_zone_id,dropoff_service_zone_id,route_pair_id,avg_duration_7d_zone_hour,avg_fare_30d_zone,trip_count_90d_zone_hour}"
 export ALLOW_EXTRA_FEATURES="${ALLOW_EXTRA_FEATURES:-false}"
 export MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-/mlsecops/model-cache}"
-export RAY_IMAGE="${RAY_IMAGE:-ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-19-06-22--5f4dbcd@sha256:24c4b9a477c80700c79da2fcac9b265e3df6aeddfd64226ec6c74bbc29540c5a}"
+export RAY_IMAGE="${RAY_IMAGE:-ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-19-07-16--21e951c@sha256:3656dbce8f448b514ca434fb4682a43baa4067f042bf01b7d6942a517fba9f25}"
 export USE_IAM="${USE_IAM:-false}"
 export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://signoz-otel-collector.signoz.svc.cluster.local:4317}"
 

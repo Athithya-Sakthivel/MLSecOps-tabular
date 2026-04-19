@@ -28,7 +28,7 @@ DEPLOYMENT_DEFAULTS: dict[str, str] = {
     "RAYSERVICE_NAME": "tabular-inference",
     "SERVICE_ACCOUNT_NAME": "ray-inference-sa",
     "AWS_SECRET_NAME": "aws-credentials",
-    "RAY_IMAGE": "ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-18-19-10--8b7aa70@sha256:b7f3bc8e5ad7be0e29e683b88e202fdafa3f050ebd262a8c01e3a22fd05d0f84",
+    "RAY_IMAGE": "ghcr.io/athithya-sakthivel/tabular-inference-service:2026-04-19-07-16--21e951c@sha256:3656dbce8f448b514ca434fb4682a43baa4067f042bf01b7d6942a517fba9f25",
     "RAY_VERSION": "2.54.1",
     "HEAD_CPU": "1",
     "HEAD_MEMORY": "4Gi",
