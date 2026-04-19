@@ -9,8 +9,8 @@ spec:
   backup:
     retentionPolicy: 30d
     barmanObjectStore:
-      destinationPath: s3://s3-temp-bucket-mlsecops-681802563986/postgres_backups/cnpg-cluster-kind/
-      serverName: mlsecops-restore-20260412t035806z
+      destinationPath: s3://e2e-mlops-data-681802563986/postgres_backups/cnpg-cluster-kind/
+      serverName: mlsecops
       s3Credentials:
         accessKeyId:
           name: aws-creds
@@ -23,24 +23,9 @@ spec:
       data:
         compression: gzip
   bootstrap:
-    recovery:
-      source: origin
-  externalClusters:
-    - name: origin
-      barmanObjectStore:
-        destinationPath: s3://s3-temp-bucket-mlsecops-681802563986/postgres_backups/cnpg-cluster-kind/
-        serverName: mlsecops
-        s3Credentials:
-          accessKeyId:
-            name: aws-creds
-            key: ACCESS_KEY_ID
-          secretAccessKey:
-            name: aws-creds
-            key: ACCESS_SECRET_KEY
-        wal:
-          compression: gzip
-        data:
-          compression: gzip
+    initdb:
+      database: flyte_admin
+      owner: app
   storage:
     storageClass: default-storage-class
     size: 5Gi

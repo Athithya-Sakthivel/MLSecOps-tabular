@@ -1,0 +1,16 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: auth-service-pdb
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: auth-service
+    app.kubernetes.io/managed-by: auth-service
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/part-of: auth-svc
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: auth-service
+      app.kubernetes.io/component: auth

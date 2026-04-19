@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference
+  labels:
+    app.kubernetes.io/name: auth-service
+    app.kubernetes.io/managed-by: auth-service
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/part-of: auth-svc
