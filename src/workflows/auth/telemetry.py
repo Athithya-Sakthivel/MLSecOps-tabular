@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, ALWAYS_ON, ParentBased, TraceIdRatioBased
 from settings import Settings
+
+logger = logging.getLogger(__name__)
 
 _STATE_LOCK = threading.Lock()
 _HANDLE: TelemetryHandle | None = None
@@ -157,58 +160,71 @@ class TelemetryHandle:
             try:
                 self.tracer_provider.shutdown()
             except Exception:
-                pass
+                logger.exception("telemetry_shutdown_failed")
 
             if _HANDLE is self:
                 _HANDLE = None
                 _STATE_KEY = None
 
 
-def initialize_telemetry(settings: Settings) -> TelemetryHandle:
+def initialize_telemetry(settings: Settings) -> TelemetryHandle | None:
+    """
+    Initialize OTEL tracing if OTEL_EXPORTER_OTLP_ENDPOINT is configured.
+    Never raises on transport/exporter setup failure; returns None instead.
+    """
     global _HANDLE, _STATE_KEY, _ATEEXIT_REGISTERED
 
+    raw_endpoint = settings.otel_endpoint
+    if not raw_endpoint:
+        return None
+
     with _STATE_LOCK:
-        endpoint, insecure = _grpc_endpoint(settings.otel_endpoint)
-        resource = _resource(settings)
-        resource_attrs = {
-            k: v for k, v in resource.attributes.items() if isinstance(k, str) and isinstance(v, str)
-        }
-        config_key = _config_key(settings, endpoint, insecure, resource_attrs)
+        try:
+            endpoint, insecure = _grpc_endpoint(raw_endpoint)
+            resource = _resource(settings)
+            resource_attrs = {
+                k: v for k, v in resource.attributes.items() if isinstance(k, str) and isinstance(v, str)
+            }
+            config_key = _config_key(settings, endpoint, insecure, resource_attrs)
 
-        if _HANDLE is not None:
-            if _STATE_KEY == config_key:
-                return _HANDLE
-            raise RuntimeError("telemetry was already initialized with a different configuration")
+            if _HANDLE is not None:
+                if _STATE_KEY == config_key:
+                    return _HANDLE
+                raise RuntimeError("telemetry was already initialized with a different configuration")
 
-        timeout_seconds = _require_positive_number("otel_timeout_seconds", settings.otel_timeout_seconds)
-        sampler_name = _normalize_sampler_name(settings.otel_traces_sampler)
-        sample_ratio = _require_ratio("trace_sample_ratio", settings.trace_sample_ratio)
+            timeout_seconds = _require_positive_number("otel_timeout_seconds", settings.otel_timeout_seconds)
+            sampler_name = _normalize_sampler_name(settings.otel_traces_sampler)
+            sample_ratio = _require_ratio("trace_sample_ratio", settings.trace_sample_ratio)
 
-        tracer_provider = TracerProvider(resource=resource, sampler=_build_sampler(settings))
-        tracer_provider.add_span_processor(
-            BatchSpanProcessor(
-                OTLPSpanExporter(
-                    endpoint=endpoint,
-                    insecure=insecure,
-                    timeout=timeout_seconds,
+            tracer_provider = TracerProvider(resource=resource, sampler=_build_sampler(settings))
+            tracer_provider.add_span_processor(
+                BatchSpanProcessor(
+                    OTLPSpanExporter(
+                        endpoint=endpoint,
+                        insecure=insecure,
+                        timeout=timeout_seconds,
+                    )
                 )
             )
-        )
-        trace.set_tracer_provider(tracer_provider)
+            trace.set_tracer_provider(tracer_provider)
 
-        handle = TelemetryHandle(
-            tracer_provider=tracer_provider,
-            endpoint=endpoint,
-            insecure=insecure,
-            sampler_name=sampler_name,
-            sample_ratio=sample_ratio,
-            timeout_seconds=timeout_seconds,
-        )
-        _HANDLE = handle
-        _STATE_KEY = config_key
+            handle = TelemetryHandle(
+                tracer_provider=tracer_provider,
+                endpoint=endpoint,
+                insecure=insecure,
+                sampler_name=sampler_name,
+                sample_ratio=sample_ratio,
+                timeout_seconds=timeout_seconds,
+            )
+            _HANDLE = handle
+            _STATE_KEY = config_key
 
-        if not _ATEEXIT_REGISTERED:
-            atexit.register(handle.shutdown)
-            _ATEEXIT_REGISTERED = True
+            if not _ATEEXIT_REGISTERED:
+                atexit.register(handle.shutdown)
+                _ATEEXIT_REGISTERED = True
 
-        return handle
+            return handle
+
+        except Exception as exc:
+            logger.warning("telemetry initialization skipped: %s", exc, exc_info=True)
+            return None

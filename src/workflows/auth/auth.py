@@ -120,8 +120,9 @@ async def _fetch_json(url: str) -> dict[str, Any]:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.json()
-        if not isinstance(data, dict):
-            raise ValueError("discovery document must be a JSON object")
+
+    if not isinstance(data, dict):
+        raise ValueError("discovery document must be a JSON object")
 
     _DISCOVERY_CACHE[url] = (now + _DISCOVERY_TTL_SECONDS, data)
     return data
@@ -402,6 +403,7 @@ def enforce_policy(settings: Settings, identity: NormalizedIdentity, claims: Map
     with tracer.start_as_current_span("auth.policy.enforce") as span:
         span.set_attribute("auth.provider", identity.provider)
         span.set_attribute("auth.email_domain", domain or "")
+
         if identity.provider == "google" and settings.google_allowed_domains:
             if domain not in {x.lower() for x in settings.google_allowed_domains}:
                 raise ValueError("google_domain_not_allowed")
@@ -422,10 +424,6 @@ def enforce_policy(settings: Settings, identity: NormalizedIdentity, claims: Map
 
 
 def build_validate_payload(session: Mapping[str, Any]) -> dict[str, Any]:
-    """
-    Shape an active session row into the JSON payload expected by the Ray Serve ingress
-    /validate caller.
-    """
     expires_at = session.get("expires_at")
     if isinstance(expires_at, datetime):
         expires_text = expires_at.astimezone(UTC).isoformat()
@@ -437,12 +435,8 @@ def build_validate_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": "ok",
         "user_id": str(session.get("user_id") or session.get("id") or ""),
-        "email": session.get("user_email")
-        or session.get("primary_email")
-        or session.get("provider_email"),
-        "name": session.get("user_name")
-        or session.get("display_name")
-        or session.get("provider_name"),
+        "email": session.get("user_email") or session.get("primary_email") or session.get("provider_email"),
+        "name": session.get("user_name") or session.get("display_name") or session.get("provider_name"),
         "provider": session.get("provider"),
         "session_id": session.get("id") or session.get("session_id"),
         "expires_at": expires_text,

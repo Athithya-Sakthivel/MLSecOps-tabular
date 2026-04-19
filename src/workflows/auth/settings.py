@@ -51,7 +51,7 @@ class Settings:
     github_allowed_orgs: list[str]
 
     metrics_enabled: bool
-    otel_endpoint: str
+    otel_endpoint: str | None
     otel_traces_sampler: str
     otel_traces_sampler_arg: float
     trace_sample_ratio: float
@@ -97,21 +97,6 @@ def _require_absolute_url(name: str, value: str) -> None:
         raise RuntimeError(f"{name} must be an absolute URL")
 
 
-def _validate_otlp_grpc_endpoint(name: str, value: str) -> None:
-    raw = value.strip()
-    if not raw:
-        raise RuntimeError(f"{name} is required")
-
-    parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="http")
-    if parsed.scheme not in ("", "http", "https"):
-        raise RuntimeError(f"{name} has unsupported scheme: {parsed.scheme!r}")
-    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
-        raise RuntimeError(f"{name} must point to an OTLP/gRPC endpoint, not OTLP/HTTP")
-    authority = (parsed.netloc or parsed.path).rstrip("/")
-    if not authority:
-        raise RuntimeError(f"{name} is invalid")
-
-
 def _normalize_samesite(raw: str) -> str:
     value = raw.strip().lower()
     if value not in _VALID_SAMESITE:
@@ -147,6 +132,21 @@ def _normalize_log_level(raw: str) -> str:
     return level
 
 
+def _derive_app_base_url(environment: str) -> str:
+    explicit = _env("APP_BASE_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    if environment in _DEV_ENVIRONMENTS:
+        return "http://127.0.0.1:8001"
+
+    domain = _env("DOMAIN", "").strip().rstrip(".")
+    if domain:
+        return f"https://auth.api.{domain}"
+
+    raise RuntimeError("APP_BASE_URL is required")
+
+
 def load_settings() -> Settings:
     environment = _env("ENVIRONMENT", "production").strip().lower()
     dev_mode = environment in _DEV_ENVIRONMENTS
@@ -158,7 +158,7 @@ def load_settings() -> Settings:
     cluster_name = _env("K8S_CLUSTER_NAME", "local-cluster").strip() or "local-cluster"
     instance_id = _env("POD_NAME", _env("HOSTNAME", "local")).strip() or "local"
 
-    app_base_url = _env("APP_BASE_URL", "").strip().rstrip("/")
+    app_base_url = _derive_app_base_url(environment)
     _require_absolute_url("APP_BASE_URL", app_base_url)
 
     validate_route_path = _env("AUTH_VALIDATE_ROUTE_PATH", "/validate").strip() or "/validate"
@@ -184,10 +184,7 @@ def load_settings() -> Settings:
     if auth_tx_ttl_seconds <= 0:
         raise RuntimeError("AUTH_TX_TTL_SECONDS must be > 0")
 
-    session_cookie_secure = _bool(
-        "SESSION_COOKIE_SECURE",
-        "true" if not dev_mode else "false",
-    )
+    session_cookie_secure = _bool("SESSION_COOKIE_SECURE", "true" if not dev_mode else "false")
     session_cookie_samesite = _normalize_samesite(_env("SESSION_COOKIE_SAMESITE", "strict"))
     session_cookie_path = _env("SESSION_COOKIE_PATH", "/").strip() or "/"
     _validate_path("SESSION_COOKIE_PATH", session_cookie_path)
@@ -210,10 +207,8 @@ def load_settings() -> Settings:
 
     metrics_enabled = _bool("METRICS_ENABLED", "true")
 
-    otel_endpoint = _env(
-        "OTEL_EXPORTER_OTLP_ENDPOINT",
-        "http://signoz-otel-collector.signoz.svc.cluster.local:4317",
-    ).strip()
+    raw_otel_endpoint = _env("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    otel_endpoint = raw_otel_endpoint or None
     otel_traces_sampler = _env("OTEL_TRACES_SAMPLER", "parentbased_traceidratio").strip().lower() or "parentbased_traceidratio"
     otel_traces_sampler_arg = _float("OTEL_TRACES_SAMPLER_ARG", "0.1")
     trace_sample_ratio = otel_traces_sampler_arg
@@ -317,7 +312,15 @@ def validate_runtime_settings(settings: Settings) -> None:
     if not settings.dev_mode and not enabled_providers(settings):
         raise RuntimeError("At least one OAuth provider must be configured in production")
 
-    _validate_otlp_grpc_endpoint("OTEL_EXPORTER_OTLP_ENDPOINT", settings.otel_endpoint)
+    if settings.otel_endpoint is not None:
+        parsed = urlparse(settings.otel_endpoint if "://" in settings.otel_endpoint else f"//{settings.otel_endpoint}", scheme="http")
+        if parsed.scheme not in ("", "http", "https"):
+            raise RuntimeError(f"OTEL_EXPORTER_OTLP_ENDPOINT has unsupported scheme: {parsed.scheme!r}")
+        if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+            raise RuntimeError("OTEL_EXPORTER_OTLP_ENDPOINT must point to OTLP/gRPC, not OTLP/HTTP")
+        authority = (parsed.netloc or parsed.path).rstrip("/")
+        if not authority:
+            raise RuntimeError("OTEL_EXPORTER_OTLP_ENDPOINT is invalid")
 
     if settings.otel_timeout_seconds <= 0:
         raise RuntimeError("OTEL_TIMEOUT_SECONDS must be > 0")
