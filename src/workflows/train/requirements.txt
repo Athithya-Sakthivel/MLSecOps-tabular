@@ -117,7 +117,7 @@ polars-runtime-32==1.39.3
 prettytable==3.17.0
 propcache==0.4.1
 proto-plus==1.27.2
-protobuf==6.33.6
+protobuf==7.34.1
 protoc-gen-openapiv2==0.0.1
 pyarrow==23.0.1
 pyasn1==0.6.3
