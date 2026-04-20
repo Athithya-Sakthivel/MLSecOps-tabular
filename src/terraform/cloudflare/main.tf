@@ -170,13 +170,6 @@ resource "cloudflare_pages_domain" "frontend_domain" {
   depends_on = [cloudflare_pages_project.frontend]
 }
 
-resource "cloudflare_pages_domain" "frontend_domain" {
-  account_id   = var.account_id
-  project_name = cloudflare_pages_project.frontend.name
-  name         = local.app_hostname
-
-  depends_on = [cloudflare_pages_project.frontend]
-}
 
 data "cloudflare_zero_trust_tunnel_cloudflared" "api" {
   account_id = var.account_id

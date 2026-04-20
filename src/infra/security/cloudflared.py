@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,11 +29,11 @@ TOKEN = os.getenv("CLOUDFLARE_TUNNEL_TOKEN", "").strip()
 
 AUTH_UPSTREAM = os.getenv(
     "AUTH_UPSTREAM",
-    "http://auth-svc.inference.svc.cluster.local",
+    "http://auth-svc.inference.svc.cluster.local:80",
 ).strip()
 PREDICT_UPSTREAM = os.getenv(
     "PREDICT_UPSTREAM",
-    "http://tabular-inference-serve-svc.inference.svc.cluster.local",
+    "http://tabular-inference-serve-svc.inference.svc.cluster.local:8000",
 ).strip()
 
 ALLOWED_PROTOCOLS = {"auto", "http2", "quic"}
@@ -57,13 +58,6 @@ def sha256_obj(obj: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def safe_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
-
-
 def run(cmd: list[str], stdin: str | None = None) -> None:
     subprocess.run(cmd, input=stdin, text=True, check=True)
 
@@ -73,7 +67,7 @@ def normalize_upstream(upstream: str) -> str:
     if not value:
         return value
     if "://" not in value:
-        return f"http://{value}"
+        value = f"http://{value}"
     return value.rstrip("/")
 
 
@@ -139,11 +133,12 @@ def render_secret(namespace: str, name: str, key: str, token: str) -> dict[str, 
 
 def render_configmap(namespace: str) -> dict[str, Any]:
     config = {
+        "tunnel": TUNNEL_NAME,
         "ingress": [
             {"hostname": auth_host(), "service": normalize_upstream(AUTH_UPSTREAM)},
             {"hostname": predict_host(), "service": normalize_upstream(PREDICT_UPSTREAM)},
             {"service": "http_status:404"},
-        ]
+        ],
     }
     return {
         "apiVersion": "v1",
@@ -162,9 +157,9 @@ def render_configmap(namespace: str) -> dict[str, Any]:
     }
 
 
-def render_routes_reference(tunnel_name: str) -> dict[str, Any]:
+def render_routes_reference() -> dict[str, Any]:
     return {
-        "tunnel": tunnel_name,
+        "tunnel": TUNNEL_NAME,
         "ingress": [
             {"hostname": auth_host(), "service": normalize_upstream(AUTH_UPSTREAM)},
             {"hostname": predict_host(), "service": normalize_upstream(PREDICT_UPSTREAM)},
@@ -301,7 +296,10 @@ def render_deployment(
 
 def build() -> tuple[list[dict[str, Any]], str]:
     require(bool(DOMAIN), "DOMAIN is required")
-    require(TUNNEL_PROTOCOL in ALLOWED_PROTOCOLS, f"TUNNEL_PROTOCOL must be one of: {', '.join(sorted(ALLOWED_PROTOCOLS))}")
+    require(
+        TUNNEL_PROTOCOL in ALLOWED_PROTOCOLS,
+        f"TUNNEL_PROTOCOL must be one of: {', '.join(sorted(ALLOWED_PROTOCOLS))}",
+    )
     require(REPLICAS > 0, "REPLICAS must be greater than 0")
     require(METRICS_PORT > 0, "METRICS_PORT must be greater than 0")
     require(STARTUP_FAILURE_THRESHOLD > 0, "CLOUDFLARED_STARTUP_FAILURE_THRESHOLD must be greater than 0")
@@ -329,24 +327,32 @@ def build() -> tuple[list[dict[str, Any]], str]:
         render_serviceaccount(NAMESPACE),
         configmap,
         render_deployment(NAMESPACE, IMAGE, REPLICAS, METRICS_PORT, SECRET_NAME, SECRET_KEY, checksum),
-        render_routes_reference(TUNNEL_NAME),
+        render_routes_reference(),
     ]
     rendered = "\n---\n".join(to_yaml(d).rstrip() for d in docs) + "\n"
     return docs, rendered
 
 
-def write_manifests(docs: list[dict[str, Any]]) -> None:
+def reset_output_dir() -> None:
+    if OUT_DIR.exists():
+        if OUT_DIR.is_dir():
+            shutil.rmtree(OUT_DIR)
+        else:
+            OUT_DIR.unlink()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    safe_write(OUT_DIR / "00-namespace.yaml", to_yaml(docs[0]))
-    safe_write(OUT_DIR / "01-serviceaccount.yaml", to_yaml(docs[1]))
-    safe_write(OUT_DIR / "02-configmap.yaml", to_yaml(docs[2]))
-    safe_write(OUT_DIR / "03-deployment.yaml", to_yaml(docs[3]))
-    safe_write(OUT_DIR / "04-routes-reference.yaml", to_yaml(docs[4]))
+
+
+def write_manifests(docs: list[dict[str, Any]]) -> None:
+    reset_output_dir()
+    (OUT_DIR / "00-namespace.yaml").write_text(to_yaml(docs[0]), encoding="utf-8")
+    (OUT_DIR / "01-serviceaccount.yaml").write_text(to_yaml(docs[1]), encoding="utf-8")
+    (OUT_DIR / "02-configmap.yaml").write_text(to_yaml(docs[2]), encoding="utf-8")
+    (OUT_DIR / "03-deployment.yaml").write_text(to_yaml(docs[3]), encoding="utf-8")
+    (OUT_DIR / "04-routes-reference.yaml").write_text(to_yaml(docs[4]), encoding="utf-8")
 
 
 def apply_rollout(docs: list[dict[str, Any]]) -> None:
     require(bool(TOKEN), "CLOUDFLARE_TUNNEL_TOKEN is required for --rollout")
-
     payload_docs = [docs[0], docs[1], docs[2], render_secret(NAMESPACE, SECRET_NAME, SECRET_KEY, TOKEN), docs[3]]
     payload = "\n---\n".join(to_yaml(d).rstrip() for d in payload_docs) + "\n"
     run(["kubectl", "apply", "-f", "-"], stdin=payload)
@@ -390,6 +396,7 @@ def main() -> None:
         return
 
     docs, rendered = build()
+
     if not args.rollout:
         sys.stdout.write(rendered)
         return

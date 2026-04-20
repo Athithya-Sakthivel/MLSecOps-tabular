@@ -7,5 +7,6 @@ metadata:
     app.kubernetes.io/name: cloudflared
     app.kubernetes.io/component: tunnel-config
 data:
-  config.yaml: "ingress:\n- hostname: auth.athithya.site\n  service: http://auth-svc.inference.svc.cluster.local\n- hostname:\
-    \ predict.athithya.site\n  service: http://tabular-inference-serve-svc.inference.svc.cluster.local\n- service: http_status:404\n"
+  config.yaml: "tunnel: tabular-api-tunnel\ningress:\n- hostname: auth.athithya.site\n  service: http://auth-svc.inference.svc.cluster.local:80\n\
+    - hostname: predict.athithya.site\n  service: http://tabular-inference-serve-svc.inference.svc.cluster.local:8000\n- service:\
+    \ http_status:404\n"
