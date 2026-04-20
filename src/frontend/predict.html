@@ -3,33 +3,26 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Predict · Tabular ML Inference</title>
-  <link rel="stylesheet" href="/static/css/tailwind.v1.css" />
-  <script src="/static/js/htmx.v1.js" defer></script>
+  <link rel="stylesheet" href="/static/css/site.v1.css" />
+  <script defer src="/static/js/app.v1.js"></script>
 </head>
-<body class="min-h-screen bg-slate-50 text-slate-900">
-  <div hx-get="/partials/navbar.html" hx-trigger="load" hx-swap="outerHTML"></div>
+<body>
+  <div id="navbar" data-fragment="/partials/navbar.html"></div>
 
-  <main class="mx-auto max-w-5xl px-4 py-10">
-    <section class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <h1 class="text-2xl font-semibold tracking-tight">Predict</h1>
-          <p class="mt-2 text-slate-600">
-            Fill the form and submit. No raw JSON input.
-          </p>
-        </div>
-        <a href="https://auth.athithya.site/login?next=/predict.html"
-           class="rounded-xl border border-slate-300 bg-white px-4 py-2">
-          Login
-        </a>
-      </div>
+  <main class="page">
+    <section class="card">
+      <p class="eyebrow">Predict</p>
+      <h1>Prediction form</h1>
+      <p class="lead">Add feature names and values. The page serializes them behind the scenes.</p>
 
-      <div class="mt-6" hx-get="/partials/predict-form.html" hx-trigger="load" hx-swap="innerHTML">
-        Loading form…
-      </div>
+      <div id="auth-panel" class="stack"></div>
 
-      <div id="predict-result" class="mt-6"></div>
+      <div id="predict-form-slot" data-fragment="/partials/predict-form.html"></div>
+      <div id="predict-result-slot" data-fragment="/partials/predict-result.html"></div>
     </section>
   </main>
 </body>

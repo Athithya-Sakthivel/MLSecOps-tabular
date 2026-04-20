@@ -137,7 +137,10 @@ resource "cloudflare_pages_project" "frontend" {
     build_command   = <<EOT
 rm -rf dist
 mkdir -p dist
-cp -R index.html predict.html partials static dist/
+cp -R src/frontend/index.html dist/
+cp -R src/frontend/predict.html dist/
+cp -R src/frontend/partials dist/
+cp -R src/frontend/static dist/
 EOT
     destination_dir = var.pages_destination_dir
     root_dir        = var.pages_root_dir
@@ -157,6 +160,14 @@ EOT
       pr_comments_enabled            = true
     }
   }
+}
+
+resource "cloudflare_pages_domain" "frontend_domain" {
+  account_id   = var.account_id
+  project_name = cloudflare_pages_project.frontend.name
+  name         = local.app_hostname
+
+  depends_on = [cloudflare_pages_project.frontend]
 }
 
 resource "cloudflare_pages_domain" "frontend_domain" {

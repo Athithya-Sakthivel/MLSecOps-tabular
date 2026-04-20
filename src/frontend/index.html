@@ -3,31 +3,28 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>Tabular ML Inference</title>
-  <link rel="stylesheet" href="/static/css/tailwind.v1.css" />
-  <script src="/static/js/htmx.v1.js" defer></script>
+  <link rel="stylesheet" href="/static/css/site.v1.css" />
+  <script defer src="/static/js/app.v1.js"></script>
 </head>
-<body class="min-h-screen bg-slate-50 text-slate-900">
-  <div hx-get="/partials/navbar.html" hx-trigger="load" hx-swap="outerHTML"></div>
+<body>
+  <div id="navbar" data-fragment="/partials/navbar.html"></div>
 
-  <main class="mx-auto max-w-5xl px-4 py-10">
-    <section class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-      <h1 class="text-3xl font-semibold tracking-tight">Tabular ML Inference</h1>
-      <p class="mt-3 text-slate-600">
-        Authenticate with your account, then open the prediction page.
-      </p>
-
-      <div class="mt-6 flex gap-3">
-        <a href="https://auth.athithya.site/login?next=/"
-           class="rounded-xl bg-slate-900 px-4 py-2 text-white">
-          Login
-        </a>
-        <a href="/predict.html"
-           class="rounded-xl border border-slate-300 bg-white px-4 py-2">
-          Predict
-        </a>
+  <main class="page">
+    <section class="card hero">
+      <p class="eyebrow">App</p>
+      <h1>Tabular ML Inference</h1>
+      <p class="lead">Sign in, then use the form-based prediction page. No raw JSON input.</p>
+      <div class="button-row">
+        <a class="button" href="/predict.html">Open predict</a>
+        <a class="button secondary" href="https://auth.athithya.site/login?next=/">Login</a>
       </div>
     </section>
+
+    <section id="auth-panel" class="stack"></section>
   </main>
 </body>
 </html>
