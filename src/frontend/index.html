@@ -1,29 +1,32 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Tabular Inference</title>
-
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <meta charset="UTF-8">
+  <title>Tabular ML Inference</title>
+  <link rel="stylesheet" href="styles.css">
 </head>
+<body>
 
-<body class="bg-gray-100 min-h-screen flex items-center justify-center">
-
-  <div class="bg-white shadow-md rounded-xl p-8 w-full max-w-md text-center">
-    <h1 class="text-2xl font-semibold mb-2">Tabular Inference</h1>
-    <p class="text-gray-600 mb-6">Run predictions on structured data</p>
-
-    <a href="https://auth.api.example.com/login/google"
-       class="block w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 mb-3">
-      Continue with Google
-    </a>
-
-    <a href="/predict.html"
-       class="block w-full border border-gray-300 py-2 rounded hover:bg-gray-50">
-      Go to Prediction
-    </a>
+  <!-- NAV -->
+  <div id="nav">
+    <img src="assets/logo.png" id="logo">
+    <div id="auth-controls"></div>
   </div>
 
+  <!-- MAIN -->
+  <div id="container">
+
+    <h1>Tabular ML Inference</h1>
+
+    <textarea id="input" placeholder="Enter JSON input..."></textarea>
+
+    <button id="predictBtn">Login required</button>
+
+    <pre id="output"></pre>
+
+  </div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

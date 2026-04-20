@@ -69,6 +69,18 @@ def normalize_next(next_value: str | None) -> str:
     return "/"
 
 
+def app_home_url(settings: Settings) -> str:
+    return settings.app_home_url.rstrip("/")
+
+
+def return_to_url(settings: Settings, next_value: str | None) -> str:
+    path = normalize_next(next_value)
+    base = app_home_url(settings)
+    if path == "/":
+        return base
+    return f"{base}{path}"
+
+
 def _current_span() -> trace.Span | None:
     try:
         span = trace.get_current_span()
@@ -432,14 +444,29 @@ def build_validate_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     else:
         expires_text = str(expires_at)
 
-    return {
-        "status": "ok",
-        "user_id": str(session.get("user_id") or session.get("id") or ""),
+    user = {
+        "id": str(session.get("user_id") or session.get("id") or ""),
         "email": session.get("user_email") or session.get("primary_email") or session.get("provider_email"),
         "name": session.get("user_name") or session.get("display_name") or session.get("provider_name"),
         "provider": session.get("provider"),
-        "session_id": session.get("id") or session.get("session_id"),
+    }
+    session_payload = {
+        "id": session.get("id") or session.get("session_id"),
         "expires_at": expires_text,
         "session_version": session.get("session_version", 1),
         "tenant_id": session.get("tenant_id"),
+    }
+
+    return {
+        "status": "ok",
+        "user_id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "provider": user["provider"],
+        "session_id": session_payload["id"],
+        "expires_at": session_payload["expires_at"],
+        "session_version": session_payload["session_version"],
+        "tenant_id": session_payload["tenant_id"],
+        "user": user,
+        "session": session_payload,
     }

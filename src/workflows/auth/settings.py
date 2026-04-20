@@ -22,6 +22,8 @@ class Settings:
     instance_id: str
 
     app_base_url: str
+    app_home_url: str
+    web_allowed_origins: list[str]
     validate_route_path: str
     me_route_path: str
 
@@ -95,6 +97,16 @@ def _require_absolute_url(name: str, value: str) -> None:
     parsed = urlparse(value)
     if not parsed.scheme or not parsed.netloc:
         raise RuntimeError(f"{name} must be an absolute URL")
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise RuntimeError(f"{name} must not contain a path, query, or fragment")
+
+
+def _validate_origin(name: str, value: str) -> None:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"{name} must be an absolute origin URL")
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise RuntimeError(f"{name} must not contain a path, query, or fragment")
 
 
 def _normalize_samesite(raw: str) -> str:
@@ -132,7 +144,7 @@ def _normalize_log_level(raw: str) -> str:
     return level
 
 
-def _derive_app_base_url(environment: str) -> str:
+def _derive_auth_base_url(environment: str) -> str:
     explicit = _env("APP_BASE_URL", "").strip().rstrip("/")
     if explicit:
         return explicit
@@ -142,9 +154,54 @@ def _derive_app_base_url(environment: str) -> str:
 
     domain = _env("DOMAIN", "").strip().rstrip(".")
     if domain:
-        return f"https://auth.api.{domain}"
+        return f"https://auth.{domain}"
 
     raise RuntimeError("APP_BASE_URL is required")
+
+
+def _derive_app_home_url(environment: str) -> str:
+    explicit = _env("APP_HOME_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    if environment in _DEV_ENVIRONMENTS:
+        return "http://127.0.0.1:3000"
+
+    domain = _env("DOMAIN", "").strip().rstrip(".")
+    if domain:
+        return f"https://app.{domain}"
+
+    raise RuntimeError("APP_HOME_URL is required")
+
+
+def _derive_session_cookie_domain() -> str | None:
+    explicit = _env("SESSION_COOKIE_DOMAIN", "").strip()
+    if explicit:
+        return explicit
+
+    domain = _env("DOMAIN", "").strip().rstrip(".")
+    if domain:
+        return f".{domain}"
+
+    return None
+
+
+def _derive_web_allowed_origins(app_home_url: str, dev_mode: bool) -> list[str]:
+    explicit = _csv("WEB_ALLOWED_ORIGINS")
+    if explicit:
+        return explicit
+
+    parsed = urlparse(app_home_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if dev_mode:
+        extras = [
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+        return [origin, *extras]
+    return [origin]
 
 
 def load_settings() -> Settings:
@@ -158,8 +215,10 @@ def load_settings() -> Settings:
     cluster_name = _env("K8S_CLUSTER_NAME", "local-cluster").strip() or "local-cluster"
     instance_id = _env("POD_NAME", _env("HOSTNAME", "local")).strip() or "local"
 
-    app_base_url = _derive_app_base_url(environment)
+    app_base_url = _derive_auth_base_url(environment)
+    app_home_url = _derive_app_home_url(environment)
     _require_absolute_url("APP_BASE_URL", app_base_url)
+    _require_absolute_url("APP_HOME_URL", app_home_url)
 
     validate_route_path = _env("AUTH_VALIDATE_ROUTE_PATH", "/validate").strip() or "/validate"
     me_route_path = _env("AUTH_ME_ROUTE_PATH", "/me").strip() or "/me"
@@ -185,10 +244,10 @@ def load_settings() -> Settings:
         raise RuntimeError("AUTH_TX_TTL_SECONDS must be > 0")
 
     session_cookie_secure = _bool("SESSION_COOKIE_SECURE", "true" if not dev_mode else "false")
-    session_cookie_samesite = _normalize_samesite(_env("SESSION_COOKIE_SAMESITE", "strict"))
+    session_cookie_samesite = _normalize_samesite(_env("SESSION_COOKIE_SAMESITE", "lax"))
     session_cookie_path = _env("SESSION_COOKIE_PATH", "/").strip() or "/"
     _validate_path("SESSION_COOKIE_PATH", session_cookie_path)
-    session_cookie_domain = _env("SESSION_COOKIE_DOMAIN", "").strip() or None
+    session_cookie_domain = _derive_session_cookie_domain()
     if session_cookie_domain is not None:
         _validate_domain_token("SESSION_COOKIE_DOMAIN", session_cookie_domain)
 
@@ -217,6 +276,10 @@ def load_settings() -> Settings:
     otel_metric_export_timeout_ms = _int("OTEL_METRIC_EXPORT_TIMEOUT_MS", "10000")
     log_level = _normalize_log_level(_env("LOG_LEVEL", "INFO"))
 
+    web_allowed_origins = _derive_web_allowed_origins(app_home_url, dev_mode)
+    for origin in web_allowed_origins:
+        _validate_origin("WEB_ALLOWED_ORIGINS", origin)
+
     settings = Settings(
         app_name=app_name,
         service_name=service_name,
@@ -227,6 +290,8 @@ def load_settings() -> Settings:
         cluster_name=cluster_name,
         instance_id=instance_id,
         app_base_url=app_base_url,
+        app_home_url=app_home_url,
+        web_allowed_origins=web_allowed_origins,
         validate_route_path=validate_route_path,
         me_route_path=me_route_path,
         postgres_dsn=postgres_dsn,
@@ -267,8 +332,13 @@ def load_settings() -> Settings:
 
 def validate_runtime_settings(settings: Settings) -> None:
     _require_absolute_url("APP_BASE_URL", settings.app_base_url)
-    if not settings.dev_mode and urlparse(settings.app_base_url).scheme != "https":
-        raise RuntimeError("APP_BASE_URL must use https in production")
+    _require_absolute_url("APP_HOME_URL", settings.app_home_url)
+
+    if not settings.dev_mode:
+        if urlparse(settings.app_base_url).scheme != "https":
+            raise RuntimeError("APP_BASE_URL must use https in production")
+        if urlparse(settings.app_home_url).scheme != "https":
+            raise RuntimeError("APP_HOME_URL must use https in production")
 
     if settings.postgres_min_size <= 0:
         raise RuntimeError("POSTGRES_MIN_SIZE must be > 0")
