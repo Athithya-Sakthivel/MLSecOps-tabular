@@ -158,6 +158,8 @@ curl -fsSL \
 
 chmod +x /usr/local/bin/cloudflared
 
+# curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs
+# cd src/frontend && npm install --package-lock-only --no-audit --no-fund
 
 # local testing requries all packages
 python3 -m venv .venv_deploy
@@ -168,6 +170,8 @@ python3 -m venv .venv_auth
 .venv_auth/bin/python -m pip install --upgrade pip wheel setuptools
 .venv_auth/bin/python -m pip install -r src/workflows/auth/requirements.txt
 
+docker run --rm -v "$PWD/src/frontend:/app" -w /app node:22.22.2-bullseye \
+  bash -lc 'npm install --package-lock-only --no-audit --no-fund'
 
 log "installing Python packages"
 python3 -m pip install --no-cache-dir --break-system-packages \

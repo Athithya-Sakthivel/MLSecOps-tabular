@@ -67,7 +67,7 @@ variable "pages_repo_id" {
 
 variable "pages_root_dir" {
   type    = string
-  default = "."
+  default = "src/frontend"
 }
 
 variable "pages_destination_dir" {
@@ -134,7 +134,11 @@ resource "cloudflare_pages_project" "frontend" {
 
   build_config = {
     build_caching   = true
-    build_command   = "rm -rf ${var.pages_destination_dir} && mkdir -p ${var.pages_destination_dir} && cp -R src/frontend/. ${var.pages_destination_dir}/"
+    build_command   = <<EOT
+rm -rf dist
+mkdir -p dist
+cp -R index.html predict.html partials static dist/
+EOT
     destination_dir = var.pages_destination_dir
     root_dir        = var.pages_root_dir
   }
@@ -146,7 +150,7 @@ resource "cloudflare_pages_project" "frontend" {
       owner                          = var.pages_repo_owner
       repo_id                        = var.pages_repo_id
       repo_name                      = var.pages_repo_name
-      path_includes                  = ["*"]
+      path_includes                  = ["src/frontend/**"]
       preview_deployment_setting     = "all"
       production_branch              = var.pages_branch
       production_deployments_enabled = true
@@ -155,21 +159,12 @@ resource "cloudflare_pages_project" "frontend" {
   }
 }
 
-resource "cloudflare_dns_record" "frontend_cname" {
-  zone_id = var.zone_id
-  name    = local.app_hostname
-  type    = "CNAME"
-  content = cloudflare_pages_project.frontend.subdomain
-  proxied = true
-  ttl     = 1
-}
-
 resource "cloudflare_pages_domain" "frontend_domain" {
   account_id   = var.account_id
   project_name = cloudflare_pages_project.frontend.name
   name         = local.app_hostname
 
-  depends_on = [cloudflare_dns_record.frontend_cname]
+  depends_on = [cloudflare_pages_project.frontend]
 }
 
 data "cloudflare_zero_trust_tunnel_cloudflared" "api" {

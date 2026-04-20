@@ -1,0 +1,28 @@
+<form
+  class="grid gap-4"
+  hx-post="https://predict.athithya.site/predict"
+  hx-target="#predict-result"
+  hx-swap="innerHTML"
+>
+  <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+    <p class="text-sm font-medium text-slate-700">Feature 1</p>
+    <input name="feature_1" type="number" step="any" required
+           class="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2" />
+  </div>
+
+  <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+    <p class="text-sm font-medium text-slate-700">Feature 2</p>
+    <input name="feature_2" type="number" step="any" required
+           class="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2" />
+  </div>
+
+  <div class="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+    <p class="text-sm font-medium text-slate-700">Feature 3</p>
+    <input name="feature_3" type="number" step="any" required
+           class="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2" />
+  </div>
+
+  <button type="submit" class="rounded-xl bg-slate-900 px-4 py-2 text-white">
+    Predict
+  </button>
+</form>

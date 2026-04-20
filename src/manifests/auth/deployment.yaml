@@ -30,7 +30,7 @@ spec:
         app.kubernetes.io/part-of: auth-svc
         app.kubernetes.io/version: v1
       annotations:
-        auth-service.io/config-checksum: 892382b1f162e447e3825b6748c3adcfc3c34fe1c2cad237582ed9dc56addcae
+        auth-service.io/config-checksum: 12cbed46fb97992429136dcb967fa660c411243db2a2f21ba1fa6b89817ea401
     spec:
       serviceAccountName: auth-sa
       automountServiceAccountToken: false
@@ -62,7 +62,7 @@ spec:
         emptyDir: {}
       containers:
       - name: auth
-        image: ghcr.io/athithya-sakthivel/auth-service:2026-04-19-11-56--bc1e4f5@sha256:a467044687dd8a0375c11ed1f04b750f05295650c60f264cd20ec1e5f4de074c
+        image: ghcr.io/athithya-sakthivel/auth-service:2026-04-20-05-49--60a8f70@sha256:3b9ffe3bdb0249e3286d7d49d65192f07923f7df5804a4bec7e0ae348d06eaf8
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
@@ -83,6 +83,8 @@ spec:
           value: production-cluster
         - name: APP_BASE_URL
           value: https://auth.athithya.site
+        - name: APP_HOME_URL
+          value: https://app.athithya.site
         - name: AUTH_VALIDATE_ROUTE_PATH
           value: /validate
         - name: AUTH_ME_ROUTE_PATH
@@ -131,7 +133,7 @@ spec:
         - name: MICROSOFT_ALLOWED_TENANT_IDS
           value: b8a65a11-9d1c-4d48-b9f6-dabfc67f2e4b
         - name: MICROSOFT_ALLOWED_DOMAINS
-          value: outlook.com, company.com, hotmail.com
+          value: outlook.com,company.com,hotmail.com
         - name: METRICS_ENABLED
           value: 'true'
         - name: OTEL_EXPORTER_OTLP_ENDPOINT

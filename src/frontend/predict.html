@@ -1,57 +1,36 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Predict</title>
-
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Predict · Tabular ML Inference</title>
+  <link rel="stylesheet" href="/static/css/tailwind.v1.css" />
+  <script src="/static/js/htmx.v1.js" defer></script>
 </head>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <div hx-get="/partials/navbar.html" hx-trigger="load" hx-swap="outerHTML"></div>
 
-<body class="bg-gray-50 min-h-screen">
+  <main class="mx-auto max-w-5xl px-4 py-10">
+    <section class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+      <div class="flex items-center justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-semibold tracking-tight">Predict</h1>
+          <p class="mt-2 text-slate-600">
+            Fill the form and submit. No raw JSON input.
+          </p>
+        </div>
+        <a href="https://auth.athithya.site/login?next=/predict.html"
+           class="rounded-xl border border-slate-300 bg-white px-4 py-2">
+          Login
+        </a>
+      </div>
 
-  <!-- Header -->
-  <div class="bg-white border-b px-6 py-3 flex justify-between items-center">
-    <h1 class="text-lg font-semibold">Prediction</h1>
+      <div class="mt-6" hx-get="/partials/predict-form.html" hx-trigger="load" hx-swap="innerHTML">
+        Loading form…
+      </div>
 
-    <a href="https://auth.api.example.com/logout"
-       class="text-sm text-red-600 hover:underline">
-      Logout
-    </a>
-  </div>
-
-  <!-- Main -->
-  <div class="max-w-3xl mx-auto p-6 space-y-6">
-
-    <!-- Input -->
-    <div class="bg-white p-4 rounded shadow-sm">
-      <h2 class="text-sm font-medium mb-2 text-gray-700">Input JSON</h2>
-
-      <form
-        hx-post="https://predict.api.example.com/predict"
-        hx-target="#result"
-        hx-swap="innerHTML">
-
-        <textarea name="instances"
-          class="w-full border rounded p-3 font-mono text-sm"
-          rows="10"
-          placeholder='[{"feature1": 1.2, "feature2": 3.4}]'></textarea>
-
-        <button
-          type="submit"
-          class="mt-3 bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">
-          Predict
-        </button>
-      </form>
-    </div>
-
-    <!-- Result -->
-    <div class="bg-white p-4 rounded shadow-sm">
-      <h2 class="text-sm font-medium mb-2 text-gray-700">Result</h2>
-      <div id="result" class="font-mono text-sm text-gray-800 whitespace-pre-wrap"></div>
-    </div>
-
-  </div>
-
+      <div id="predict-result" class="mt-6"></div>
+    </section>
+  </main>
 </body>
 </html>
