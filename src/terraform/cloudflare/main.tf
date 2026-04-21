@@ -30,18 +30,6 @@ variable "tunnel_name" {
   default     = "tabular-api-tunnel"
 }
 
-variable "auth_upstream" {
-  description = "Internal auth upstream URL used by cloudflared ingress"
-  type        = string
-  default     = "http://auth-svc.inference.svc.cluster.local:80"
-}
-
-variable "predict_upstream" {
-  description = "Internal predict upstream URL used by cloudflared ingress"
-  type        = string
-  default     = "http://tabular-inference-serve-svc.inference.svc.cluster.local:8000"
-}
-
 variable "pages_project_name" {
   type    = string
   default = "tabular-ui"
@@ -92,7 +80,7 @@ variable "rate_limit_action" {
 
 variable "rate_limit_requests" {
   type    = number
-  default = 10
+  default = 60
 
   validation {
     condition     = var.rate_limit_requests > 0
@@ -121,10 +109,10 @@ variable "rate_limit_mitigation_timeout" {
 }
 
 locals {
-  app_hostname    = "app.${var.domain}"
-  auth_hostname   = "auth.${var.domain}"
+  app_hostname     = "app.${var.domain}"
+  auth_hostname    = "auth.${var.domain}"
   predict_hostname = "predict.${var.domain}"
-  tunnel_cname    = "${data.cloudflare_zero_trust_tunnel_cloudflared.api.id}.cfargotunnel.com"
+  tunnel_cname     = "${data.cloudflare_zero_trust_tunnel_cloudflared.api.id}.cfargotunnel.com"
 }
 
 resource "cloudflare_pages_project" "frontend" {
@@ -134,13 +122,10 @@ resource "cloudflare_pages_project" "frontend" {
 
   build_config = {
     build_caching   = true
-    build_command   = <<EOT
-rm -rf dist
-mkdir -p dist
-cp -R src/frontend/index.html dist/
-cp -R src/frontend/predict.html dist/
-cp -R src/frontend/partials dist/
-cp -R src/frontend/static dist/
+    build_command   = <<-EOT
+rm -rf "${var.pages_destination_dir}"
+mkdir -p "${var.pages_destination_dir}"
+cp -R index.html predict.html partials static "${var.pages_destination_dir}/"
 EOT
     destination_dir = var.pages_destination_dir
     root_dir        = var.pages_root_dir
@@ -162,14 +147,25 @@ EOT
   }
 }
 
+resource "cloudflare_dns_record" "frontend_cname" {
+  zone_id = var.zone_id
+  name    = local.app_hostname
+  type    = "CNAME"
+  content = cloudflare_pages_project.frontend.subdomain
+  proxied = true
+  ttl     = 1
+}
+
 resource "cloudflare_pages_domain" "frontend_domain" {
   account_id   = var.account_id
   project_name = cloudflare_pages_project.frontend.name
   name         = local.app_hostname
 
-  depends_on = [cloudflare_pages_project.frontend]
+  depends_on = [
+    cloudflare_pages_project.frontend,
+    cloudflare_dns_record.frontend_cname,
+  ]
 }
-
 
 data "cloudflare_zero_trust_tunnel_cloudflared" "api" {
   account_id = var.account_id
@@ -206,7 +202,7 @@ resource "cloudflare_dns_record" "predict_api_cname" {
 resource "cloudflare_ruleset" "zone_custom_firewall" {
   zone_id     = var.zone_id
   name        = "zone-custom-firewall"
-  description = "Basic zone firewall rule for non-standard HTTP(S) ports"
+  description = "Block non-standard HTTP(S) ports"
   kind        = "zone"
   phase       = "http_request_firewall_custom"
 
@@ -225,7 +221,7 @@ resource "cloudflare_ruleset" "zone_rate_limit" {
   count       = var.rate_limit_enabled ? 1 : 0
   zone_id     = var.zone_id
   name        = "zone-rate-limit"
-  description = "Basic rate limiting for API hosts"
+  description = "Rate limiting for API hosts"
   kind        = "zone"
   phase       = "http_ratelimit"
 

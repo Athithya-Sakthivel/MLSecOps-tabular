@@ -13,7 +13,18 @@ from typing import Any
 
 import yaml
 
-ROOT = Path.cwd()
+
+class LiteralStr(str):
+    pass
+
+
+def _literal_str_representer(dumper: yaml.Dumper, data: LiteralStr):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+
+
+yaml.SafeDumper.add_representer(LiteralStr, _literal_str_representer)
+
+ROOT = Path(__file__).resolve().parents[3]
 OUT_DIR = ROOT / "src" / "manifests" / "cloudflared"
 
 NAMESPACE = os.getenv("NAMESPACE", "inference").strip() or "inference"
@@ -45,7 +56,13 @@ LIVENESS_INITIAL_DELAY_SECONDS = int(os.getenv("CLOUDFLARED_LIVENESS_INITIAL_DEL
 LIVENESS_PERIOD_SECONDS = int(os.getenv("CLOUDFLARED_LIVENESS_PERIOD_SECONDS", "10"))
 
 
-def to_yaml(obj: Any) -> str:
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        print(f"ERROR: {message}", file=sys.stderr)
+        sys.exit(2)
+
+
+def dump_yaml(obj: Any) -> str:
     return yaml.safe_dump(obj, sort_keys=False, default_flow_style=False, width=120)
 
 
@@ -64,24 +81,19 @@ def run(cmd: list[str], stdin: str | None = None) -> None:
 
 def normalize_upstream(upstream: str) -> str:
     value = upstream.strip()
-    if not value:
-        return value
+    require(bool(value), "upstream values must not be empty")
     if "://" not in value:
         value = f"http://{value}"
     return value.rstrip("/")
 
 
-def require(condition: bool, message: str) -> None:
-    if not condition:
-        print(f"ERROR: {message}", file=sys.stderr)
-        sys.exit(2)
-
-
 def auth_host() -> str:
+    require(bool(DOMAIN), "DOMAIN is required")
     return f"auth.{DOMAIN}"
 
 
 def predict_host() -> str:
+    require(bool(DOMAIN), "DOMAIN is required")
     return f"predict.{DOMAIN}"
 
 
@@ -131,7 +143,7 @@ def render_secret(namespace: str, name: str, key: str, token: str) -> dict[str, 
     }
 
 
-def render_configmap(namespace: str) -> dict[str, Any]:
+def render_config_yaml() -> str:
     config = {
         "tunnel": TUNNEL_NAME,
         "ingress": [
@@ -140,6 +152,10 @@ def render_configmap(namespace: str) -> dict[str, Any]:
             {"service": "http_status:404"},
         ],
     }
+    return dump_yaml(config).rstrip() + "\n"
+
+
+def render_configmap(namespace: str) -> dict[str, Any]:
     return {
         "apiVersion": "v1",
         "kind": "ConfigMap",
@@ -152,7 +168,7 @@ def render_configmap(namespace: str) -> dict[str, Any]:
             },
         },
         "data": {
-            "config.yaml": to_yaml(config),
+            "config.yaml": LiteralStr(render_config_yaml()),
         },
     }
 
@@ -329,32 +345,39 @@ def build() -> tuple[list[dict[str, Any]], str]:
         render_deployment(NAMESPACE, IMAGE, REPLICAS, METRICS_PORT, SECRET_NAME, SECRET_KEY, checksum),
         render_routes_reference(),
     ]
-    rendered = "\n---\n".join(to_yaml(d).rstrip() for d in docs) + "\n"
+    rendered = "\n---\n".join(dump_yaml(d).rstrip() for d in docs) + "\n"
     return docs, rendered
 
 
 def reset_output_dir() -> None:
     if OUT_DIR.exists():
-        if OUT_DIR.is_dir():
-            shutil.rmtree(OUT_DIR)
-        else:
-            OUT_DIR.unlink()
+        shutil.rmtree(OUT_DIR)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def write_manifests(docs: list[dict[str, Any]]) -> None:
     reset_output_dir()
-    (OUT_DIR / "00-namespace.yaml").write_text(to_yaml(docs[0]), encoding="utf-8")
-    (OUT_DIR / "01-serviceaccount.yaml").write_text(to_yaml(docs[1]), encoding="utf-8")
-    (OUT_DIR / "02-configmap.yaml").write_text(to_yaml(docs[2]), encoding="utf-8")
-    (OUT_DIR / "03-deployment.yaml").write_text(to_yaml(docs[3]), encoding="utf-8")
-    (OUT_DIR / "04-routes-reference.yaml").write_text(to_yaml(docs[4]), encoding="utf-8")
+    atomic_files = [
+        ("00-namespace.yaml", docs[0]),
+        ("01-serviceaccount.yaml", docs[1]),
+        ("02-configmap.yaml", docs[2]),
+        ("03-deployment.yaml", docs[3]),
+        ("04-routes-reference.yaml", docs[4]),
+    ]
+    for filename, doc in atomic_files:
+        (OUT_DIR / filename).write_text(dump_yaml(doc), encoding="utf-8")
 
 
 def apply_rollout(docs: list[dict[str, Any]]) -> None:
     require(bool(TOKEN), "CLOUDFLARE_TUNNEL_TOKEN is required for --rollout")
-    payload_docs = [docs[0], docs[1], docs[2], render_secret(NAMESPACE, SECRET_NAME, SECRET_KEY, TOKEN), docs[3]]
-    payload = "\n---\n".join(to_yaml(d).rstrip() for d in payload_docs) + "\n"
+    payload_docs = [
+        docs[0],
+        docs[1],
+        docs[2],
+        render_secret(NAMESPACE, SECRET_NAME, SECRET_KEY, TOKEN),
+        docs[3],
+    ]
+    payload = "\n---\n".join(dump_yaml(d).rstrip() for d in payload_docs) + "\n"
     run(["kubectl", "apply", "-f", "-"], stdin=payload)
 
 
@@ -382,6 +405,7 @@ def destroy() -> None:
             "--ignore-not-found=true",
         ]
     )
+    shutil.rmtree(OUT_DIR, ignore_errors=True)
 
 
 def main() -> None:

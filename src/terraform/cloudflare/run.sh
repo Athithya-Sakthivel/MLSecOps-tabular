@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Resolves and validates required Cloudflare/GitHub/Tunnel environment variables (zone_id, repo_id, credentials).
-# Chooses authentication method (API token vs global API key) and prepares Cloudflare request helpers.
+# Chooses authentication method (global API key) and prepares Cloudflare request helpers.
 # Auto-creates or reuses an existing Cloudflare Tunnel and exports its tunnel ID for Terraform usage.
 # Imports existing Cloudflare resources (Pages project, DNS records, rulesets) into Terraform state if they already exist.
 # Initializes and validates the Terraform/OpenTofu working directory.
 # Runs plan/apply/destroy based on CLI argument, applying Cloudflare DNS, Pages, tunnel, and firewall config.
 # Optionally cleans up the tunnel on destroy and prints final Terraform outputs (URLs, tunnel token, project info).
 
+#!/usr/bin/env bash
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -43,14 +44,12 @@ export TF_VAR_account_id="${TF_VAR_account_id:-${CLOUDFLARE_ACCOUNT_ID:-}}"
 export TF_VAR_zone_id="${TF_VAR_zone_id:-${CLOUDFLARE_ZONE_ID:-}}"
 export TF_VAR_domain="${TF_VAR_domain:-${CLOUDFLARE_ZONE:-${DOMAIN:-}}}"
 export TF_VAR_tunnel_name="${TF_VAR_tunnel_name:-${CLOUDFLARE_TUNNEL_NAME:-tabular-api-tunnel}}"
-export TF_VAR_auth_upstream="${TF_VAR_auth_upstream:-${AUTH_UPSTREAM:-http://auth-svc.inference.svc.cluster.local:80}}"
-export TF_VAR_predict_upstream="${TF_VAR_predict_upstream:-${PREDICT_UPSTREAM:-http://tabular-inference-serve-svc.inference.svc.cluster.local:8000}}"
 export TF_VAR_pages_repo_owner="${TF_VAR_pages_repo_owner:-${GITHUB_OWNER:-}}"
 export TF_VAR_pages_repo_name="${TF_VAR_pages_repo_name:-${GITHUB_REPO:-}}"
 export TF_VAR_pages_repo_id="${TF_VAR_pages_repo_id:-${GITHUB_REPOSITORY_ID:-}}"
 export TF_VAR_pages_project_name="${TF_VAR_pages_project_name:-tabular-ui}"
 export TF_VAR_pages_branch="${TF_VAR_pages_branch:-main}"
-export TF_VAR_pages_root_dir="${TF_VAR_pages_root_dir:-.}"
+export TF_VAR_pages_root_dir="${TF_VAR_pages_root_dir:-src/frontend}"
 export TF_VAR_pages_destination_dir="${TF_VAR_pages_destination_dir:-dist}"
 export TF_VAR_rate_limit_enabled="${TF_VAR_rate_limit_enabled:-true}"
 export TF_VAR_rate_limit_action="${TF_VAR_rate_limit_action:-block}"
@@ -165,23 +164,25 @@ get_tunnel_id() {
 ensure_tunnel() {
   ensure_cloudflared_login
 
-  local tunnel_id
-  tunnel_id="$(get_tunnel_id || true)"
-
-  if [[ -z "${tunnel_id}" || "${tunnel_id}" == "null" ]]; then
+  local tunnel_id=""
+  if [[ -z "$(get_tunnel_id || true)" || "$(get_tunnel_id || true)" == "null" ]]; then
     echo "[INFO] creating tunnel ${TF_VAR_tunnel_name}" >&2
-    cloudflared tunnel create "${TF_VAR_tunnel_name}" >&2
-    tunnel_id="$(get_tunnel_id || true)"
+    cloudflared tunnel create "${TF_VAR_tunnel_name}" >&2 || true
   else
-    echo "[INFO] reusing tunnel ${TF_VAR_tunnel_name} (${tunnel_id})" >&2
+    echo "[INFO] reusing tunnel ${TF_VAR_tunnel_name}" >&2
   fi
 
-  if [[ -z "${tunnel_id}" || "${tunnel_id}" == "null" ]]; then
-    echo "ERROR: could not resolve tunnel ID" >&2
-    exit 5
-  fi
+  for _ in $(seq 1 10); do
+    tunnel_id="$(get_tunnel_id || true)"
+    if [[ -n "${tunnel_id}" && "${tunnel_id}" != "null" ]]; then
+      echo "${tunnel_id}"
+      return 0
+    fi
+    sleep 1
+  done
 
-  echo "${tunnel_id}"
+  echo "ERROR: could not resolve tunnel ID" >&2
+  exit 5
 }
 
 import_if_exists() {

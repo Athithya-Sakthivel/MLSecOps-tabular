@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 from auth import (
@@ -23,7 +23,6 @@ from auth import (
     pkce_challenge,
     pkce_verifier,
     provider_config,
-    return_to_url,
     validate_id_token,
 )
 from db import (
@@ -113,6 +112,40 @@ def _redirect(location: str, request_id: str | None = None) -> RedirectResponse:
     if request_id:
         response.headers[REQUEST_ID_HEADER] = request_id
     return response
+
+
+def _app_home_url() -> str:
+    explicit = str(getattr(SETTINGS, "app_home_url", "") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    base_url = str(getattr(SETTINGS, "app_base_url", "") or "").strip().rstrip("/")
+    if not base_url:
+        return "/"
+
+    parsed = urlparse(base_url)
+    scheme = parsed.scheme or "https"
+    host = parsed.hostname or ""
+    if host.startswith("auth."):
+        return f"{scheme}://app.{host.removeprefix('auth.')}"
+    return base_url
+
+
+def _cors_origins() -> list[str]:
+    explicit = getattr(SETTINGS, "web_allowed_origins", None)
+    if isinstance(explicit, list) and explicit:
+        return explicit
+    return [_app_home_url()]
+
+
+def _return_to_url(next_value: str | None) -> str:
+    path = normalize_next(next_value)
+    home = _app_home_url().rstrip("/")
+    if path == "/":
+        return home
+    if path.startswith("/"):
+        return f"{home}{path}"
+    return home
 
 
 def _resolve_session_id(request: Request) -> str | None:
@@ -213,19 +246,23 @@ async def _login_start(request: Request, provider: str, next_value: str, request
     try:
         cfg = await _provider_cfg(provider)
     except LookupError:
-        return _html(
+        response = _html(
             denied_page("Provider unavailable", "That login provider is not enabled."),
             status_code=404,
             request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
-        return _html(
+        response = _html(
             denied_page("Login unavailable", "Could not initialize the selected provider.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     state = uuid.uuid4().hex
     verifier = pkce_verifier()
@@ -250,11 +287,13 @@ async def _login_start(request: Request, provider: str, next_value: str, request
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("auth_transaction_create_failed", extra={"provider": provider, "request_id": request_id})
-        return _html(
+        response = _html(
             denied_page("Login unavailable", "Unable to create the login transaction.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     _span_event("auth.login.start", request_id=request_id, provider=provider, return_to=next_path)
     response = _redirect(build_authorize_url(cfg, state=state, code_challenge=challenge, nonce=nonce), request_id)
@@ -384,7 +423,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
             user_agent=_user_agent(request),
         )
 
-        response = _redirect(return_to_url(SETTINGS, tx["return_to"]), request_id)
+        response = _redirect(_return_to_url(tx["return_to"]), request_id)
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session["id"],
@@ -476,7 +515,7 @@ async def _logout(request: Request, request_id: str) -> Response:
             _security_headers(response)
             return response
 
-    response = _redirect(SETTINGS.app_home_url, request_id)
+    response = _redirect(_app_home_url(), request_id)
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path=SETTINGS.session_cookie_path,
@@ -498,7 +537,7 @@ async def _readyz(request: Request, request_id: str) -> Response:
             "status": "ok",
             "service_name": SETTINGS.service_name,
             "service_version": SETTINGS.service_version,
-            "app_home_url": SETTINGS.app_home_url,
+            "app_home_url": _app_home_url(),
             "validate_route": validate_url(SETTINGS),
             "me_route": f"{SETTINGS.app_base_url}{SETTINGS.me_route_path}",
         },
@@ -515,7 +554,7 @@ async def _root(_: Request, request_id: str) -> Response:
             "service_version": SETTINGS.service_version,
             "environment": SETTINGS.environment,
             "enabled_providers": enabled_providers(SETTINGS),
-            "app_home_url": SETTINGS.app_home_url,
+            "app_home_url": _app_home_url(),
             "validate_route": validate_url(SETTINGS),
             "me_route": f"{SETTINGS.app_base_url}{SETTINGS.me_route_path}",
         },
@@ -597,7 +636,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=SETTINGS.web_allowed_origins,
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
