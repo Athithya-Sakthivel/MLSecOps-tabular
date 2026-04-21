@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -569,8 +569,14 @@ async def _readyz(request: Request, request_id: str) -> Response:
     )
 
 
-async def _root(_: Request, request_id: str) -> Response:
-    return _json(
+async def _root(request: Request, request_id: str) -> Response:
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept or "application/xhtml+xml" in accept:
+        response = _redirect(f"{_app_home_url()}/login", request_id)
+        _security_headers(response)
+        return response
+
+    response = _json(
         {
             "status": "ok",
             "service_name": SETTINGS.service_name,
@@ -584,6 +590,8 @@ async def _root(_: Request, request_id: str) -> Response:
         200,
         request_id,
     )
+    _security_headers(response)
+    return response
 
 
 @asynccontextmanager
@@ -637,16 +645,12 @@ async def lifespan(app: FastAPI):
                 logger.exception("prune_task_shutdown_failed")
 
         if pool is not None:
-            try:
+            with suppress(Exception):
                 await pool.close()
-            except Exception:
-                logger.exception("db_pool_close_failed")
 
         if telemetry is not None:
-            try:
+            with suppress(Exception):
                 telemetry.shutdown()
-            except Exception:
-                logger.exception("telemetry_shutdown_failed")
 
 
 app = FastAPI(
@@ -659,7 +663,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
+    allow_origins=SETTINGS.web_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -765,7 +769,9 @@ async def login(request: Request):
         _provider_links(next_value),
         "Use an enabled provider to sign in.",
     )
-    return _html(html, 200, request_id)
+    response = _html(html, 200, request_id)
+    _security_headers(response)
+    return response
 
 
 @app.get("/login/start/{provider}")
@@ -796,6 +802,7 @@ async def metrics_endpoint(request: Request):
 
     response = Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
     response.headers[REQUEST_ID_HEADER] = request_id
+    _security_headers(response)
     return response
 
 
