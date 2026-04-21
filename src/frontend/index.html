@@ -6,21 +6,25 @@
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
+  <meta name="referrer" content="no-referrer" />
   <title>Tabular ML Inference</title>
   <link rel="stylesheet" href="/static/css/site.v1.css" />
   <script defer src="/static/js/app.v1.js"></script>
 </head>
-<body>
+<body data-page="home">
   <div id="navbar" data-fragment="/partials/navbar.html"></div>
 
   <main class="page">
     <section class="card hero">
       <p class="eyebrow">App</p>
       <h1>Tabular ML Inference</h1>
-      <p class="lead">Sign in, then use the form-based prediction page. No raw JSON input.</p>
+      <p class="lead">
+        Sign in, then submit feature values through a form-driven prediction flow.
+      </p>
+
       <div class="button-row">
-        <a class="button" href="/predict.html">Open predict</a>
-        <a class="button secondary" href="https://auth.athithya.site/login?next=/">Login</a>
+        <a class="button" href="/predict.html">Open prediction page</a>
+        <a class="button secondary" data-login-link href="https://auth.athithya.site/login?next=/">Login</a>
       </div>
     </section>
 

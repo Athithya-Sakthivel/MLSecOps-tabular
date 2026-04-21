@@ -1,29 +1,90 @@
 <section class="card">
   <div class="section-head">
     <h2>Enter features</h2>
-    <p class="muted">No raw JSON input. Use named feature rows.</p>
+    <p class="muted">One row per model feature. No raw JSON input.</p>
   </div>
 
-  <form id="predict-form" class="stack">
-    <div id="feature-rows" class="feature-rows">
-      <div class="feature-row" data-feature-row>
-        <input class="input" name="feature_name" placeholder="Feature name" autocomplete="off" />
-        <input class="input" name="feature_value" placeholder="Value" autocomplete="off" />
-        <button type="button" class="button ghost" data-remove-row>Remove</button>
-      </div>
-    </div>
+  <form id="predict-form" class="stack" autocomplete="off">
+    <div class="feature-grid">
+      <label class="field">
+        <span>pickup_hour</span>
+        <input class="input" name="pickup_hour" type="number" min="0" max="23" step="1" placeholder="0 to 23" />
+      </label>
 
-    <template id="feature-row-template">
-      <div class="feature-row" data-feature-row>
-        <input class="input" name="feature_name" placeholder="Feature name" autocomplete="off" />
-        <input class="input" name="feature_value" placeholder="Value" autocomplete="off" />
-        <button type="button" class="button ghost" data-remove-row>Remove</button>
-      </div>
-    </template>
+      <label class="field">
+        <span>pickup_dow</span>
+        <input class="input" name="pickup_dow" type="number" min="0" max="6" step="1" placeholder="0 to 6" />
+      </label>
+
+      <label class="field">
+        <span>pickup_month</span>
+        <input class="input" name="pickup_month" type="number" min="1" max="12" step="1" placeholder="1 to 12" />
+      </label>
+
+      <label class="field">
+        <span>pickup_is_weekend</span>
+        <input class="input" name="pickup_is_weekend" type="number" min="0" max="1" step="1" placeholder="0 or 1" />
+      </label>
+
+      <label class="field">
+        <span>pickup_borough_id</span>
+        <input class="input" name="pickup_borough_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>pickup_zone_id</span>
+        <input class="input" name="pickup_zone_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>pickup_service_zone_id</span>
+        <input class="input" name="pickup_service_zone_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>dropoff_borough_id</span>
+        <input class="input" name="dropoff_borough_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>dropoff_zone_id</span>
+        <input class="input" name="dropoff_zone_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>dropoff_service_zone_id</span>
+        <input class="input" name="dropoff_service_zone_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>route_pair_id</span>
+        <input class="input" name="route_pair_id" type="number" step="1" placeholder="numeric id" />
+      </label>
+
+      <label class="field">
+        <span>avg_duration_7d_zone_hour</span>
+        <input class="input" name="avg_duration_7d_zone_hour" type="number" step="any" placeholder="numeric value" />
+      </label>
+
+      <label class="field">
+        <span>avg_fare_30d_zone</span>
+        <input class="input" name="avg_fare_30d_zone" type="number" step="any" placeholder="numeric value" />
+      </label>
+
+      <label class="field">
+        <span>trip_count_90d_zone_hour</span>
+        <input class="input" name="trip_count_90d_zone_hour" type="number" step="any" placeholder="numeric value" />
+      </label>
+    </div>
 
     <div class="button-row">
-      <button type="button" class="button secondary" id="add-feature">Add feature</button>
-      <button type="submit" class="button">Predict</button>
+      <button type="button" class="button secondary" id="fill-sample">Use sample values</button>
+      <button type="button" class="button secondary" id="clear-form">Clear</button>
+      <button type="submit" class="button" id="predict-submit">Predict</button>
     </div>
+
+    <p class="muted tiny">
+      Fill at least the required fields for your model. The request body is built automatically.
+    </p>
   </form>
 </section>
