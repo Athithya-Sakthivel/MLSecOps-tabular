@@ -4,13 +4,11 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Mapping
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
-import db as db_module
 import httpx
 from auth import (
     build_authorize_url,
@@ -58,7 +56,6 @@ REQUEST_ID_HEADER = "X-Request-Id"
 SESSION_COOKIE_NAME = SETTINGS.session_cookie_name
 SESSION_TTL_SECONDS = SETTINGS.session_ttl_seconds
 AUTH_TX_TTL_SECONDS = SETTINGS.auth_tx_ttl_seconds
-AUTH_TX_TABLE_CANDIDATES = ("auth_transactions", "auth_transaction", "auth_tx")
 
 
 def _route_key(path: str) -> str:
@@ -228,62 +225,6 @@ async def _provider_cfg(provider: str):
     return await provider_config(SETTINGS, provider)
 
 
-def _row_to_dict(row: Any) -> dict[str, Any] | None:
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return row
-    if isinstance(row, Mapping):
-        return dict(row)
-    try:
-        return dict(row)
-    except Exception:
-        return None
-
-
-async def _load_auth_transaction(pool: Any, state: str) -> dict[str, Any]:
-    helper = None
-    for attr in ("get_auth_transaction", "fetch_auth_transaction", "load_auth_transaction"):
-        candidate = getattr(db_module, attr, None)
-        if callable(candidate):
-            helper = candidate
-            break
-
-    tx: dict[str, Any] | None = None
-    if helper is not None:
-        raw = await helper(pool, state)
-        tx = _row_to_dict(raw)
-    else:
-        last_exc: Exception | None = None
-        for table in AUTH_TX_TABLE_CANDIDATES:
-            try:
-                raw = await pool.fetchrow(f"SELECT * FROM {table} WHERE state = $1 LIMIT 1", state)
-                tx = _row_to_dict(raw)
-                if tx is not None:
-                    break
-            except Exception as exc:
-                last_exc = exc
-                continue
-        if tx is None:
-            if last_exc is not None:
-                raise last_exc
-            raise ValueError("auth_transaction_invalid")
-
-    if tx is None:
-        raise ValueError("auth_transaction_invalid")
-
-    expires_at = tx.get("expires_at")
-    if isinstance(expires_at, str):
-        with suppress(Exception):
-            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    if isinstance(expires_at, datetime):
-        expires_at_cmp = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
-        if expires_at_cmp <= datetime.now(UTC):
-            raise ValueError("auth_transaction_expired")
-
-    return tx
-
-
 async def _session_lookup(request: Request, request_id: str, session_id: str) -> JSONResponse:
     try:
         session = await get_session(_pool(request), session_id)
@@ -410,11 +351,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         return response
 
     try:
-        tx = await _load_auth_transaction(_pool(request), state)
-        if tx.get("provider") != provider:
-            raise ValueError("provider_mismatch")
-        if tx.get("redirect_uri") != callback_url(SETTINGS, provider):
-            raise ValueError("redirect_uri_mismatch")
+        tx = await consume_auth_transaction(_pool(request), state)
     except ValueError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("auth_transaction_invalid", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
@@ -427,10 +364,26 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         return response
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.exception("auth_transaction_lookup_failed", extra={"provider": provider, "request_id": request_id})
+        logger.exception("auth_transaction_consume_failed", extra={"provider": provider, "request_id": request_id})
         response = _html(
             denied_page("Login unavailable", "Could not load the login transaction.", details=str(exc)),
             status_code=503,
+            request_id=request_id,
+        )
+        _security_headers(response)
+        return response
+
+    try:
+        if tx["provider"] != provider:
+            raise ValueError("provider_mismatch")
+        if tx["redirect_uri"] != callback_url(SETTINGS, provider):
+            raise ValueError("redirect_uri_mismatch")
+    except ValueError as exc:
+        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
+        logger.warning("auth_transaction_invalid", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
+        response = _html(
+            denied_page("Login failed", "The login transaction is invalid or expired.", details=str(exc)),
+            status_code=400,
             request_id=request_id,
         )
         _security_headers(response)
@@ -462,19 +415,6 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
             orgs = {str(org).lower() for org in claims.get("orgs", []) if str(org).strip()}
             if not orgs.intersection(allowed):
                 raise ValueError("github_org_not_allowed")
-
-        try:
-            await consume_auth_transaction(_pool(request), state)
-        except Exception as exc:
-            _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-            logger.exception("auth_transaction_consume_failed", extra={"provider": provider, "request_id": request_id})
-            response = _html(
-                denied_page("Login unavailable", "The login transaction could not be finalized.", details=str(exc)),
-                status_code=503,
-                request_id=request_id,
-            )
-            _security_headers(response)
-            return response
 
         user, _external = await find_or_create_user(
             _pool(request),

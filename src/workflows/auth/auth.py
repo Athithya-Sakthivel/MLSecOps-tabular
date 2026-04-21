@@ -325,7 +325,13 @@ def _coerce_leeway_seconds(value: int | None) -> int:
     return max(int(value), 0)
 
 
-async def validate_id_token(cfg: ProviderConfig, id_token: str, nonce: str, *, leeway_seconds: int | None = None) -> dict[str, Any]:
+async def validate_id_token(
+    cfg: ProviderConfig,
+    id_token: str,
+    nonce: str,
+    *,
+    leeway_seconds: int | None = None,
+) -> dict[str, Any]:
     if not cfg.oidc:
         return {}
     if not id_token:

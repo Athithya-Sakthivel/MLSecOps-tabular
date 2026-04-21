@@ -53,7 +53,7 @@ spec:
         app.kubernetes.io/part-of: auth-svc
         app.kubernetes.io/version: v1
       annotations:
-        auth-service.io/config-checksum: f8b0dc69d768aa9fc9116654875cd8696b5de57b83d39dc8043359fe0ac08da9
+        auth-service.io/config-checksum: 21524a97b76e8f2bf2bb446df2bca526e138239ebd28a0f2e75330d87318a79c
     spec:
       serviceAccountName: auth-sa
       automountServiceAccountToken: false
@@ -85,7 +85,7 @@ spec:
         emptyDir: {}
       containers:
       - name: auth
-        image: ghcr.io/athithya-sakthivel/auth-service:2026-04-21-17-30--7ef65eb@sha256:7b05ef5bf877e43084cd235b87e70d3743fa80bf47bf1927ec2cfc8a018f19b7
+        image: ghcr.io/athithya-sakthivel/auth-service:2026-04-21-17-45--e626ab3@sha256:b90ca4571d80bc1f7165ef321909dd6edaaf3b779d0cd4d0d2ea39c820925631
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
