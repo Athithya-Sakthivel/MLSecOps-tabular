@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import secrets
 import time
 from collections.abc import Mapping
@@ -21,6 +22,7 @@ tracer = trace.get_tracer("auth-service")
 _DISCOVERY_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _DISCOVERY_TTL_SECONDS = 3600
 _HTTP_TIMEOUT_SECONDS = 10.0
+OIDC_CLOCK_SKEW_SECONDS = max(int(os.getenv("OIDC_CLOCK_SKEW_SECONDS", "120")), 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,18 +69,6 @@ def normalize_next(next_value: str | None) -> str:
     if next_value.startswith("/") and not next_value.startswith("//"):
         return next_value
     return "/"
-
-
-def app_home_url(settings: Settings) -> str:
-    return settings.app_home_url.rstrip("/")
-
-
-def return_to_url(settings: Settings, next_value: str | None) -> str:
-    path = normalize_next(next_value)
-    base = app_home_url(settings)
-    if path == "/":
-        return base
-    return f"{base}{path}"
 
 
 def _current_span() -> trace.Span | None:
@@ -329,7 +319,13 @@ async def fetch_github_orgs(access_token: str) -> list[str]:
     ]
 
 
-async def validate_id_token(cfg: ProviderConfig, id_token: str, nonce: str) -> dict[str, Any]:
+def _coerce_leeway_seconds(value: int | None) -> int:
+    if value is None:
+        return OIDC_CLOCK_SKEW_SECONDS
+    return max(int(value), 0)
+
+
+async def validate_id_token(cfg: ProviderConfig, id_token: str, nonce: str, *, leeway_seconds: int | None = None) -> dict[str, Any]:
     if not cfg.oidc:
         return {}
     if not id_token:
@@ -337,26 +333,38 @@ async def validate_id_token(cfg: ProviderConfig, id_token: str, nonce: str) -> d
     if not cfg.jwks_url or not cfg.issuer:
         raise ValueError("oidc_metadata_incomplete")
 
+    leeway = _coerce_leeway_seconds(leeway_seconds)
+
     with tracer.start_as_current_span("auth.id_token.validate") as span:
         span.set_attribute("auth.provider", cfg.name)
         span.set_attribute("auth.issuer", cfg.issuer)
-        jwk_client = jwt.PyJWKClient(cfg.jwks_url)
-        signing_key = jwk_client.get_signing_key_from_jwt(id_token).key
-        claims = jwt.decode(
-            id_token,
-            signing_key,
-            algorithms=["RS256", "RS384", "RS512"],
-            audience=cfg.client_id,
-            issuer=cfg.issuer,
-            options={
-                "require": ["exp", "iat", "iss", "aud", "sub"],
-                "verify_signature": True,
-                "verify_exp": True,
-                "verify_iat": True,
-                "verify_aud": True,
-                "verify_iss": True,
-            },
-        )
+        span.set_attribute("auth.leeway_seconds", leeway)
+
+        try:
+            jwk_client = jwt.PyJWKClient(cfg.jwks_url)
+            signing_key = jwk_client.get_signing_key_from_jwt(id_token).key
+            claims = jwt.decode(
+                id_token,
+                signing_key,
+                algorithms=["RS256", "RS384", "RS512"],
+                audience=cfg.client_id,
+                issuer=cfg.issuer,
+                leeway=leeway,
+                options={
+                    "require": ["exp", "iat", "iss", "aud", "sub"],
+                    "verify_signature": True,
+                    "verify_exp": True,
+                    "verify_iat": True,
+                    "verify_aud": True,
+                    "verify_iss": True,
+                },
+            )
+        except jwt.InvalidTokenError as exc:
+            _span_error(exc, auth_provider=cfg.name, auth_issuer=cfg.issuer, error_type=exc.__class__.__name__)
+            raise ValueError(str(exc)) from exc
+        except Exception as exc:
+            _span_error(exc, auth_provider=cfg.name, auth_issuer=cfg.issuer, error_type=exc.__class__.__name__)
+            raise ValueError(str(exc)) from exc
 
     if not isinstance(claims, dict):
         raise ValueError("id_token claims must be a JSON object")
@@ -444,29 +452,14 @@ def build_validate_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     else:
         expires_text = str(expires_at)
 
-    user = {
-        "id": str(session.get("user_id") or session.get("id") or ""),
+    return {
+        "status": "ok",
+        "user_id": str(session.get("user_id") or session.get("id") or ""),
         "email": session.get("user_email") or session.get("primary_email") or session.get("provider_email"),
         "name": session.get("user_name") or session.get("display_name") or session.get("provider_name"),
         "provider": session.get("provider"),
-    }
-    session_payload = {
-        "id": session.get("id") or session.get("session_id"),
+        "session_id": session.get("id") or session.get("session_id"),
         "expires_at": expires_text,
         "session_version": session.get("session_version", 1),
         "tenant_id": session.get("tenant_id"),
-    }
-
-    return {
-        "status": "ok",
-        "user_id": user["id"],
-        "email": user["email"],
-        "name": user["name"],
-        "provider": user["provider"],
-        "session_id": session_payload["id"],
-        "expires_at": session_payload["expires_at"],
-        "session_version": session_payload["session_version"],
-        "tenant_id": session_payload["tenant_id"],
-        "user": user,
-        "session": session_payload,
     }

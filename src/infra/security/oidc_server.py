@@ -317,7 +317,7 @@ def load_deployment_settings() -> DeploymentSettings:
         service_name=_env_str("AUTH_SERVICE_NAME", SERVICE_NAME),
         service_account_name=_env_str("SERVICE_ACCOUNT_NAME", SERVICE_ACCOUNT_NAME),
         secret_name=_env_str("AUTH_SECRET_NAME", SECRET_NAME),
-        image=_env_str("AUTH_IMAGE", "ghcr.io/athithya-sakthivel/auth-service:2026-04-21-07-12--bac3944@sha256:95db66ef0e0426cfbd4077e3b52421c6c893bf5dd9b43dfafbaa14b491e2c50a"),
+        image=_env_str("AUTH_IMAGE", "ghcr.io/athithya-sakthivel/auth-service:2026-04-21-17-30--7ef65eb@sha256:7b05ef5bf877e43084cd235b87e70d3743fa80bf47bf1927ec2cfc8a018f19b7"),
         replicas=_env_int("AUTH_REPLICAS", 1),
         cpu_request=_env_str("AUTH_CPU_REQUEST", "500m"),
         cpu_limit=_env_str("AUTH_CPU_LIMIT", "1000m"),

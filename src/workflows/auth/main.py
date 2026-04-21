@@ -4,11 +4,13 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import urlencode, urlparse
 
+import db as db_module
 import httpx
 from auth import (
     build_authorize_url,
@@ -41,7 +43,6 @@ from db import (
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from jwt.exceptions import ImmatureSignatureError, PyJWTError
 from opentelemetry import trace
 from opentelemetry.propagate import extract
 from opentelemetry.trace import SpanKind, Status, StatusCode, get_current_span
@@ -57,6 +58,7 @@ REQUEST_ID_HEADER = "X-Request-Id"
 SESSION_COOKIE_NAME = SETTINGS.session_cookie_name
 SESSION_TTL_SECONDS = SETTINGS.session_ttl_seconds
 AUTH_TX_TTL_SECONDS = SETTINGS.auth_tx_ttl_seconds
+AUTH_TX_TABLE_CANDIDATES = ("auth_transactions", "auth_transaction", "auth_tx")
 
 
 def _route_key(path: str) -> str:
@@ -115,37 +117,38 @@ def _redirect(location: str, request_id: str | None = None) -> RedirectResponse:
     return response
 
 
-def _html_error(title: str, detail: str, status_code: int, request_id: str) -> HTMLResponse:
-    response = _html(
-        denied_page(title, detail),
-        status_code=status_code,
-        request_id=request_id,
-    )
-    _security_headers(response)
-    return response
+def _app_home_url() -> str:
+    explicit = str(getattr(SETTINGS, "app_home_url", "") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+
+    base_url = str(getattr(SETTINGS, "app_base_url", "") or "").strip().rstrip("/")
+    if not base_url:
+        return "/"
+
+    parsed = urlparse(base_url)
+    scheme = parsed.scheme or "https"
+    host = parsed.hostname or ""
+    if host.startswith("auth."):
+        return f"{scheme}://app.{host.removeprefix('auth.')}"
+    return base_url
 
 
-def _frontend_home_url() -> str:
-    return SETTINGS.app_home_url.rstrip("/") or SETTINGS.app_home_url
+def _cors_origins() -> list[str]:
+    explicit = getattr(SETTINGS, "web_allowed_origins", None)
+    if isinstance(explicit, list) and explicit:
+        return explicit
+    return [_app_home_url()]
 
 
-def _safe_relative_path(next_value: str | None) -> str:
+def _return_to_url(next_value: str | None) -> str:
     path = normalize_next(next_value)
-    if not path:
-        return "/"
-    if not path.startswith("/") or path.startswith("//"):
-        return "/"
-    if any(ch in path for ch in ("\x00", "\r", "\n")):
-        return "/"
-    return path
-
-
-def _frontend_url(path: str | None) -> str:
-    home = _frontend_home_url()
-    rel = _safe_relative_path(path)
-    if rel == "/":
+    home = _app_home_url().rstrip("/")
+    if path == "/":
         return home
-    return f"{home}{rel}"
+    if path.startswith("/"):
+        return f"{home}{path}"
+    return home
 
 
 def _resolve_session_id(request: Request) -> str | None:
@@ -213,11 +216,9 @@ def _pool(request: Request):
 
 
 def _provider_links(next_value: str) -> dict[str, str]:
-    safe_next = quote(_safe_relative_path(next_value), safe="/?=&")
-    return {
-        provider: f"/login/start/{provider}?next={safe_next}"
-        for provider in enabled_providers(SETTINGS)
-    }
+    safe_next = normalize_next(next_value)
+    query = urlencode({"next": safe_next})
+    return {provider: f"/login/start/{provider}?{query}" for provider in enabled_providers(SETTINGS)}
 
 
 async def _provider_cfg(provider: str):
@@ -227,12 +228,67 @@ async def _provider_cfg(provider: str):
     return await provider_config(SETTINGS, provider)
 
 
+def _row_to_dict(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, Mapping):
+        return dict(row)
+    try:
+        return dict(row)
+    except Exception:
+        return None
+
+
+async def _load_auth_transaction(pool: Any, state: str) -> dict[str, Any]:
+    helper = None
+    for attr in ("get_auth_transaction", "fetch_auth_transaction", "load_auth_transaction"):
+        candidate = getattr(db_module, attr, None)
+        if callable(candidate):
+            helper = candidate
+            break
+
+    tx: dict[str, Any] | None = None
+    if helper is not None:
+        raw = await helper(pool, state)
+        tx = _row_to_dict(raw)
+    else:
+        last_exc: Exception | None = None
+        for table in AUTH_TX_TABLE_CANDIDATES:
+            try:
+                raw = await pool.fetchrow(f"SELECT * FROM {table} WHERE state = $1 LIMIT 1", state)
+                tx = _row_to_dict(raw)
+                if tx is not None:
+                    break
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if tx is None:
+            if last_exc is not None:
+                raise last_exc
+            raise ValueError("auth_transaction_invalid")
+
+    if tx is None:
+        raise ValueError("auth_transaction_invalid")
+
+    expires_at = tx.get("expires_at")
+    if isinstance(expires_at, str):
+        with suppress(Exception):
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    if isinstance(expires_at, datetime):
+        expires_at_cmp = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
+        if expires_at_cmp <= datetime.now(UTC):
+            raise ValueError("auth_transaction_expired")
+
+    return tx
+
+
 async def _session_lookup(request: Request, request_id: str, session_id: str) -> JSONResponse:
     try:
         session = await get_session(_pool(request), session_id)
         if session is not None:
-            with suppress(Exception):
-                await touch_session(_pool(request), session_id)
+            await touch_session(_pool(request), session_id)
     except Exception as exc:
         _span_error(exc, request_id=request_id, error_type=exc.__class__.__name__)
         logger.exception("session_lookup_failed", extra={"request_id": request_id})
@@ -245,26 +301,28 @@ async def _session_lookup(request: Request, request_id: str, session_id: str) ->
 
 
 async def _login_start(request: Request, provider: str, next_value: str, request_id: str) -> Response:
-    next_path = _safe_relative_path(next_value)
+    next_path = normalize_next(next_value)
 
     try:
         cfg = await _provider_cfg(provider)
     except LookupError:
-        return _html_error(
-            "Provider unavailable",
-            "That login provider is not enabled.",
-            404,
-            request_id,
+        response = _html(
+            denied_page("Provider unavailable", "That login provider is not enabled."),
+            status_code=404,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login unavailable",
-            "Could not initialize the selected provider.",
-            503,
-            request_id,
+        response = _html(
+            denied_page("Login unavailable", "Could not initialize the selected provider.", details=str(exc)),
+            status_code=503,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     state = uuid.uuid4().hex
     verifier = pkce_verifier()
@@ -289,12 +347,13 @@ async def _login_start(request: Request, provider: str, next_value: str, request
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("auth_transaction_create_failed", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login unavailable",
-            "Unable to create the login transaction.",
-            503,
-            request_id,
+        response = _html(
+            denied_page("Login unavailable", "Unable to create the login transaction.", details=str(exc)),
+            status_code=503,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     _span_event("auth.login.start", request_id=request_id, provider=provider, return_to=next_path)
     response = _redirect(build_authorize_url(cfg, state=state, code_challenge=challenge, nonce=nonce), request_id)
@@ -306,107 +365,88 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
     provider = provider.lower().strip()
 
     if request.query_params.get("error"):
-        details = f"{request.query_params.get('error')}: {request.query_params.get('error_description') or ''}".strip()
-        return _html_error(
-            "Login denied",
-            "The identity provider rejected the login attempt."
-            + (f" Details: {details}" if details else ""),
-            403,
-            request_id,
+        response = _html(
+            denied_page(
+                "Login denied",
+                "The identity provider rejected the login attempt.",
+                details=f"{request.query_params.get('error')}: {request.query_params.get('error_description') or ''}".strip(),
+            ),
+            status_code=403,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     code = request.query_params.get("code")
     state = request.query_params.get("state")
     if not code or not state:
-        return _html_error(
-            "Login failed",
-            "Missing authorization response.",
-            400,
-            request_id,
+        response = _html(
+            denied_page("Login failed", "Missing authorization response."),
+            status_code=400,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     try:
         cfg = await _provider_cfg(provider)
     except LookupError:
-        return _html_error(
-            "Provider unavailable",
-            "That login provider is not enabled.",
-            404,
-            request_id,
+        response = _html(
+            denied_page("Provider unavailable", "That login provider is not enabled."),
+            status_code=404,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login unavailable",
-            "Could not initialize the selected provider.",
-            503,
-            request_id,
+        response = _html(
+            denied_page("Login unavailable", "Could not initialize the selected provider.", details=str(exc)),
+            status_code=503,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     try:
-        tx = await consume_auth_transaction(_pool(request), state)
-        if not isinstance(tx, dict):
-            raise ValueError("invalid_auth_transaction")
+        tx = await _load_auth_transaction(_pool(request), state)
         if tx.get("provider") != provider:
             raise ValueError("provider_mismatch")
         if tx.get("redirect_uri") != callback_url(SETTINGS, provider):
             raise ValueError("redirect_uri_mismatch")
-        return_to = _safe_relative_path(str(tx.get("return_to") or "/"))
-        nonce = str(tx.get("nonce") or "")
-        code_verifier = str(tx.get("code_verifier") or "")
-    except (ValueError, KeyError, LookupError) as exc:
+    except ValueError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.warning(
-            "auth_transaction_invalid",
-            extra={"provider": provider, "request_id": request_id, "error": str(exc)},
+        logger.warning("auth_transaction_invalid", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
+        response = _html(
+            denied_page("Login failed", "The login transaction is invalid or expired.", details=str(exc)),
+            status_code=400,
+            request_id=request_id,
         )
-        return _html_error(
-            "Login failed",
-            "The login transaction is invalid or expired.",
-            400,
-            request_id,
-        )
+        _security_headers(response)
+        return response
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.exception("auth_transaction_consume_failed", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login unavailable",
-            "The authentication service is temporarily unavailable.",
-            503,
-            request_id,
+        logger.exception("auth_transaction_lookup_failed", extra={"provider": provider, "request_id": request_id})
+        response = _html(
+            denied_page("Login unavailable", "Could not load the login transaction.", details=str(exc)),
+            status_code=503,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
     try:
-        token_response = await exchange_code(cfg, code, code_verifier)
+        token_response = await exchange_code(cfg, code, tx["code_verifier"])
         access_token = token_response.get("access_token") or ""
         id_token = token_response.get("id_token") or ""
 
         claims: dict[str, Any] = {}
         if cfg.oidc:
-            try:
-                claims.update(await validate_id_token(cfg, id_token, nonce))
-            except ImmatureSignatureError:
-                return _html_error(
-                    "Login unavailable",
-                    "The identity provider token was issued too recently. Please try again.",
-                    503,
-                    request_id,
-                )
-            except PyJWTError as exc:
-                _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-                logger.warning("id_token_invalid", extra={"provider": provider, "request_id": request_id})
-                return _html_error(
-                    "Login failed",
-                    "The identity provider token could not be validated.",
-                    403,
-                    request_id,
-                )
-
-            with suppress(Exception):
-                userinfo = await fetch_userinfo(cfg, access_token)
-                if userinfo:
-                    claims.update(userinfo)
+            claims.update(await validate_id_token(cfg, id_token, tx["nonce"]))
+            userinfo = await fetch_userinfo(cfg, access_token)
+            if userinfo:
+                claims.update(userinfo)
         else:
             userinfo = await fetch_userinfo(cfg, access_token)
             if userinfo:
@@ -415,11 +455,6 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
                 claims["orgs"] = await fetch_github_orgs(access_token)
 
         identity = normalize_identity(provider, claims)
-        if not identity.sub:
-            raise ValueError("identity_missing_subject")
-        if not identity.email:
-            raise ValueError("identity_missing_email")
-
         enforce_policy(SETTINGS, identity, claims)
 
         if provider == "github" and SETTINGS.github_allowed_orgs:
@@ -428,17 +463,29 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
             if not orgs.intersection(allowed):
                 raise ValueError("github_org_not_allowed")
 
+        try:
+            await consume_auth_transaction(_pool(request), state)
+        except Exception as exc:
+            _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
+            logger.exception("auth_transaction_consume_failed", extra={"provider": provider, "request_id": request_id})
+            response = _html(
+                denied_page("Login unavailable", "The login transaction could not be finalized.", details=str(exc)),
+                status_code=503,
+                request_id=request_id,
+            )
+            _security_headers(response)
+            return response
+
         user, _external = await find_or_create_user(
             _pool(request),
             {
                 "provider": identity.provider,
                 "sub": identity.sub,
                 "email": identity.email,
-                "name": identity.name or identity.email,
+                "name": identity.name,
                 "tenant_id": identity.tenant_id,
             },
         )
-
         session = await create_session(
             _pool(request),
             user_id=user["id"],
@@ -447,20 +494,19 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
             user_agent=_user_agent(request),
         )
 
-        with suppress(Exception):
-            await audit(
-                _pool(request),
-                "login_success",
-                provider=identity.provider,
-                user_id=user["id"],
-                session_id=session["id"],
-                subject=identity.sub,
-                detail={"return_to": return_to},
-                ip_addr=_client_ip(request),
-                user_agent=_user_agent(request),
-            )
+        await audit(
+            _pool(request),
+            "login_success",
+            provider=identity.provider,
+            user_id=user["id"],
+            session_id=session["id"],
+            subject=identity.sub,
+            detail={"return_to": tx.get("return_to")},
+            ip_addr=_client_ip(request),
+            user_agent=_user_agent(request),
+        )
 
-        response = _redirect(_frontend_url(return_to), request_id)
+        response = _redirect(_return_to_url(tx.get("return_to")), request_id)
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session["id"],
@@ -478,48 +524,53 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
     except httpx.TimeoutException as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type="timeout")
         logger.warning("provider_timeout", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login unavailable",
-            "The identity provider timed out.",
-            503,
-            request_id,
+        response = _html(
+            denied_page("Login unavailable", "The identity provider timed out.", details=str(exc)),
+            status_code=503,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except httpx.RequestError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("provider_unreachable", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login unavailable",
-            "The identity provider is unavailable.",
-            503,
-            request_id,
+        response = _html(
+            denied_page("Login unavailable", "The identity provider is unavailable.", details=str(exc)),
+            status_code=503,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except httpx.HTTPStatusError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("provider_http_error", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login failed",
-            "The identity provider rejected the exchange.",
-            502,
-            request_id,
+        response = _html(
+            denied_page("Login failed", "The identity provider rejected the exchange.", details=str(exc)),
+            status_code=502,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except ValueError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("login_failed", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
-        return _html_error(
-            "Login failed",
-            "Authentication was rejected.",
-            403,
-            request_id,
+        response = _html(
+            denied_page("Login failed", "Authentication was rejected.", details=str(exc)),
+            status_code=403,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("callback_failed", extra={"provider": provider, "request_id": request_id})
-        return _html_error(
-            "Login failed",
-            "The authentication flow could not be completed.",
-            502,
-            request_id,
+        response = _html(
+            denied_page("Login failed", "The authentication flow could not be completed.", details=str(exc)),
+            status_code=502,
+            request_id=request_id,
         )
+        _security_headers(response)
+        return response
 
 
 async def _logout(request: Request, request_id: str) -> Response:
@@ -528,32 +579,30 @@ async def _logout(request: Request, request_id: str) -> Response:
         try:
             session = await get_session(_pool(request), session_id)
             if session is not None:
-                with suppress(Exception):
-                    await revoke_session(_pool(request), session_id)
-                with suppress(Exception):
-                    await audit(
-                        _pool(request),
-                        "logout",
-                        provider=None,
-                        user_id=session.get("user_id"),
-                        session_id=session.get("id"),
-                        subject=None,
-                        detail={},
-                        ip_addr=_client_ip(request),
-                        user_agent=_user_agent(request),
-                    )
+                await revoke_session(_pool(request), session_id)
+                await audit(
+                    _pool(request),
+                    "logout",
+                    provider=None,
+                    user_id=session.get("user_id"),
+                    session_id=session.get("id"),
+                    subject=None,
+                    detail={},
+                    ip_addr=_client_ip(request),
+                    user_agent=_user_agent(request),
+                )
         except Exception as exc:
             _span_error(exc, request_id=request_id, error_type=exc.__class__.__name__)
-            logger.exception("logout_session_lookup_failed", extra={"request_id": request_id})
+            logger.exception("logout_failed", extra={"request_id": request_id})
+            response = _json({"error": "auth_service_unavailable"}, 503, request_id)
+            _security_headers(response)
+            return response
 
-    response = _redirect(_frontend_home_url(), request_id)
+    response = _redirect(_app_home_url(), request_id)
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path=SETTINGS.session_cookie_path,
         domain=SETTINGS.session_cookie_domain,
-        secure=SETTINGS.session_cookie_secure,
-        httponly=True,
-        samesite=SETTINGS.session_cookie_samesite,
     )
     _security_headers(response)
     return response
@@ -571,7 +620,7 @@ async def _readyz(request: Request, request_id: str) -> Response:
             "status": "ok",
             "service_name": SETTINGS.service_name,
             "service_version": SETTINGS.service_version,
-            "app_home_url": _frontend_home_url(),
+            "app_home_url": _app_home_url(),
             "validate_route": validate_url(SETTINGS),
             "me_route": f"{SETTINGS.app_base_url}{SETTINGS.me_route_path}",
         },
@@ -588,7 +637,7 @@ async def _root(_: Request, request_id: str) -> Response:
             "service_version": SETTINGS.service_version,
             "environment": SETTINGS.environment,
             "enabled_providers": enabled_providers(SETTINGS),
-            "app_home_url": _frontend_home_url(),
+            "app_home_url": _app_home_url(),
             "validate_route": validate_url(SETTINGS),
             "me_route": f"{SETTINGS.app_base_url}{SETTINGS.me_route_path}",
         },
@@ -670,9 +719,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=SETTINGS.web_allowed_origins,
+    allow_origins=_cors_origins(),
     allow_credentials=True,
-    allow_methods=["GET", "HEAD", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=[REQUEST_ID_HEADER],
 )
@@ -728,22 +777,22 @@ async def observability_middleware(request: Request, call_next):
     return response
 
 
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.get("/")
 async def root(request: Request):
     return await _root(request, _request_id(request))
 
 
-@app.api_route("/healthz", methods=["GET", "HEAD"])
+@app.get("/healthz")
 async def healthz(request: Request):
     return _json({"status": "ok"}, 200, _request_id(request))
 
 
-@app.api_route("/readyz", methods=["GET", "HEAD"])
+@app.get("/readyz")
 async def readyz(request: Request):
     return await _readyz(request, _request_id(request))
 
 
-@app.api_route(SETTINGS.me_route_path, methods=["GET", "HEAD"])
+@app.get(SETTINGS.me_route_path)
 async def me(request: Request):
     request_id = _request_id(request)
     session_id = _resolve_session_id(request)
@@ -752,7 +801,7 @@ async def me(request: Request):
     return await _session_lookup(request, request_id, session_id)
 
 
-@app.api_route(SETTINGS.validate_route_path, methods=["GET", "HEAD"])
+@app.get(SETTINGS.validate_route_path)
 async def validate(request: Request):
     request_id = _request_id(request)
     session_id = _resolve_session_id(request)
@@ -766,14 +815,13 @@ async def logout(request: Request):
     return await _logout(request, _request_id(request))
 
 
-@app.api_route("/login", methods=["GET", "HEAD"], response_class=HTMLResponse)
+@app.get("/login", response_class=HTMLResponse)
 async def login(request: Request):
     request_id = _request_id(request)
-    next_value = _safe_relative_path(request.query_params.get("next") or "/")
-    providers = enabled_providers(SETTINGS)
+    next_value = normalize_next(request.query_params.get("next"))
     html = login_page(
         SETTINGS.app_name,
-        providers,
+        enabled_providers(SETTINGS),
         _provider_links(next_value),
         "Use an enabled provider to sign in.",
     )
