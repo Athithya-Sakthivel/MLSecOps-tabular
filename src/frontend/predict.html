@@ -1,34 +1,12 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0" />
-  <meta http-equiv="Pragma" content="no-cache" />
-  <meta http-equiv="Expires" content="0" />
-  <meta name="referrer" content="no-referrer" />
-  <title>Predict · Tabular ML Inference</title>
-  <link rel="stylesheet" href="/static/css/site.v1.css" />
-  <script defer src="/static/js/app.v1.js"></script>
-</head>
-<body data-page="predict">
-  <div id="navbar" data-fragment="/partials/navbar.html"></div>
-
-  <main class="page">
-    <section class="card hero compact">
-      <p class="eyebrow">Predict</p>
-      <h1>Prediction form</h1>
-      <p class="lead">
-        Enter named features. The page builds the JSON request behind the scenes.
-      </p>
-    </section>
-
-    <section id="auth-panel" class="stack"></section>
-
-    <section id="predict-shell" class="stack">
-      <div id="predict-form-slot" data-fragment="/partials/predict-form.html"></div>
-      <div id="predict-result-slot" data-fragment="/partials/predict-result.html"></div>
-    </section>
-  </main>
-</body>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Predict</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/predict.js"></script>
+  </body>
 </html>

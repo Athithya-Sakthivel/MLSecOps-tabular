@@ -122,13 +122,9 @@ resource "cloudflare_pages_project" "frontend" {
 
   build_config = {
     build_caching   = true
-    build_command   = <<-EOT
-rm -rf "${var.pages_destination_dir}"
-mkdir -p "${var.pages_destination_dir}"
-cp -R index.html predict.html partials static "${var.pages_destination_dir}/"
-EOT
-    destination_dir = var.pages_destination_dir
-    root_dir        = var.pages_root_dir
+    build_command   = "npm ci && npm run build"
+    destination_dir = "dist"
+    root_dir        = "src/frontend"
   }
 
   source = {
