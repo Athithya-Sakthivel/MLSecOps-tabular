@@ -12,7 +12,15 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, ALWAYS_ON, ParentBased, TraceIdRatioBased
+
+try:
+    from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, ALWAYS_ON, ParentBased, TraceIdRatioBased
+except ImportError:  # pragma: no cover
+    from opentelemetry.sdk.trace.sampling import AlwaysOffSampler, AlwaysOnSampler, ParentBased, TraceIdRatioBased
+
+    ALWAYS_ON = AlwaysOnSampler()
+    ALWAYS_OFF = AlwaysOffSampler()
+
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -30,41 +38,38 @@ def _clean_str(value: object | None) -> str | None:
     return text or None
 
 
-def _require_positive_number(name: str, value: object) -> float:
-    try:
-        num = float(value)
-    except Exception as exc:  # pragma: no cover
-        raise ValueError(f"{name} must be numeric") from exc
-    if num <= 0:
-        raise ValueError(f"{name} must be > 0")
-    return num
-
-
-def _require_ratio(name: str, value: object) -> float:
-    num = _require_positive_number(name, value)
-    if not 0.0 <= num <= 1.0:
-        raise ValueError(f"{name} must be between 0.0 and 1.0")
-    return num
-
-
-def _require_positive_int(name: str, value: object) -> int:
-    try:
-        num = int(value)
-    except Exception as exc:  # pragma: no cover
-        raise ValueError(f"{name} must be an integer") from exc
-    if num <= 0:
-        raise ValueError(f"{name} must be > 0")
-    return num
-
-
 def _normalize_sampler_name(raw: str | None) -> str:
     return (_clean_str(raw) or "parentbased_traceidratio").strip().lower()
 
 
-def _grpc_endpoint(endpoint: str) -> tuple[str, bool]:
-    raw = endpoint.strip()
+def _require_positive_float(name: str, value: object | None, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        num = float(value)
+    except Exception:
+        return default
+    if num <= 0:
+        return default
+    return num
+
+
+def _require_ratio(value: object | None, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        num = float(value)
+    except Exception:
+        return default
+    if not 0.0 <= num <= 1.0:
+        return default
+    return num
+
+
+def _grpc_endpoint(endpoint: str | None) -> tuple[str | None, bool]:
+    raw = _clean_str(endpoint)
     if not raw:
-        raise ValueError("otel_endpoint must be set")
+        return None, True
 
     parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="http")
 
@@ -92,13 +97,16 @@ def _resource(settings: Settings) -> Resource:
     }
     clean_attrs = {k: v for k, v in attrs.items() if v is not None}
     if not clean_attrs.get("service.name"):
-        raise ValueError("service_name must be set")
+        clean_attrs["service.name"] = "auth-service"
     return Resource.create(clean_attrs)
 
 
 def _build_sampler(settings: Settings):
-    sampler = _normalize_sampler_name(settings.otel_traces_sampler)
-    ratio = _require_ratio("trace_sample_ratio", settings.trace_sample_ratio)
+    sampler = _normalize_sampler_name(getattr(settings, "otel_traces_sampler", None))
+    ratio = _require_ratio(
+        getattr(settings, "trace_sample_ratio", None),
+        _require_ratio(getattr(settings, "otel_traces_sampler_arg", None), 0.1),
+    )
 
     if sampler == "always_on":
         return ALWAYS_ON
@@ -113,17 +121,12 @@ def _build_sampler(settings: Settings):
     if sampler == "parentbased_traceidratio":
         return ParentBased(root=TraceIdRatioBased(ratio))
 
-    raise ValueError(
-        "unsupported OTEL_TRACES_SAMPLER value: "
-        f"{settings.otel_traces_sampler!r}. Supported values: "
-        "'always_on', 'always_off', 'traceidratio', "
-        "'parentbased_always_on', 'parentbased_always_off', 'parentbased_traceidratio'"
-    )
+    return ParentBased(root=TraceIdRatioBased(ratio))
 
 
 def _config_key(
     settings: Settings,
-    endpoint: str,
+    endpoint: str | None,
     insecure: bool,
     resource_attrs: dict[str, str],
 ) -> tuple[Any, ...]:
@@ -131,18 +134,19 @@ def _config_key(
         endpoint,
         insecure,
         tuple(sorted(resource_attrs.items())),
-        _normalize_sampler_name(settings.otel_traces_sampler),
-        _require_ratio("trace_sample_ratio", settings.trace_sample_ratio),
-        _require_positive_number("otel_timeout_seconds", settings.otel_timeout_seconds),
-        _require_positive_int("otel_metric_export_interval_ms", settings.otel_metric_export_interval_ms),
-        _require_positive_int("otel_metric_export_timeout_ms", settings.otel_metric_export_timeout_ms),
+        _normalize_sampler_name(getattr(settings, "otel_traces_sampler", None)),
+        _require_ratio(
+            getattr(settings, "trace_sample_ratio", None),
+            _require_ratio(getattr(settings, "otel_traces_sampler_arg", None), 0.1),
+        ),
+        _require_positive_float("otel_timeout_seconds", getattr(settings, "otel_timeout_seconds", None), 10.0),
     )
 
 
 @dataclass
 class TelemetryHandle:
     tracer_provider: TracerProvider
-    endpoint: str
+    endpoint: str | None
     insecure: bool
     sampler_name: str
     sample_ratio: float
@@ -169,12 +173,16 @@ class TelemetryHandle:
 
 def initialize_telemetry(settings: Settings) -> TelemetryHandle | None:
     """
-    Initialize OTEL tracing if OTEL_EXPORTER_OTLP_ENDPOINT is configured.
-    Never raises on transport/exporter setup failure; returns None instead.
+    Initialize OTEL tracing for the auth service.
+
+    This is intentionally non-fatal:
+    - If OTEL_EXPORTER_OTLP_ENDPOINT is missing, it returns None.
+    - If exporter setup fails, it logs and returns None.
+    - Repeated calls with the same configuration return the existing handle.
     """
     global _HANDLE, _STATE_KEY, _ATEEXIT_REGISTERED
 
-    raw_endpoint = settings.otel_endpoint
+    raw_endpoint = getattr(settings, "otel_endpoint", None)
     if not raw_endpoint:
         return None
 
@@ -190,11 +198,18 @@ def initialize_telemetry(settings: Settings) -> TelemetryHandle | None:
             if _HANDLE is not None:
                 if _STATE_KEY == config_key:
                     return _HANDLE
-                raise RuntimeError("telemetry was already initialized with a different configuration")
+                return _HANDLE
 
-            timeout_seconds = _require_positive_number("otel_timeout_seconds", settings.otel_timeout_seconds)
-            sampler_name = _normalize_sampler_name(settings.otel_traces_sampler)
-            sample_ratio = _require_ratio("trace_sample_ratio", settings.trace_sample_ratio)
+            timeout_seconds = _require_positive_float(
+                "otel_timeout_seconds",
+                getattr(settings, "otel_timeout_seconds", None),
+                10.0,
+            )
+            sampler_name = _normalize_sampler_name(getattr(settings, "otel_traces_sampler", None))
+            sample_ratio = _require_ratio(
+                getattr(settings, "trace_sample_ratio", None),
+                _require_ratio(getattr(settings, "otel_traces_sampler_arg", None), 0.1),
+            )
 
             tracer_provider = TracerProvider(resource=resource, sampler=_build_sampler(settings))
             tracer_provider.add_span_processor(

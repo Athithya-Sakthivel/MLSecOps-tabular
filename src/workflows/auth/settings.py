@@ -8,6 +8,14 @@ from urllib.parse import urlparse
 _DEV_ENVIRONMENTS = {"dev", "development", "local", "test"}
 _VALID_SAMESITE = {"strict", "lax", "none"}
 _VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+_VALID_OTEL_SAMPLERS = {
+    "always_on",
+    "always_off",
+    "traceidratio",
+    "parentbased_always_on",
+    "parentbased_always_off",
+    "parentbased_traceidratio",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,14 +202,81 @@ def _derive_web_allowed_origins(app_home_url: str, dev_mode: bool) -> list[str]:
     parsed = urlparse(app_home_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     if dev_mode:
-        extras = [
+        return [
+            origin,
             "http://127.0.0.1:3000",
             "http://localhost:3000",
             "http://127.0.0.1:5173",
             "http://localhost:5173",
         ]
-        return [origin, *extras]
     return [origin]
+
+
+def _env_otlp_timeout_seconds() -> float:
+    """
+    Supports the common OpenTelemetry timeout envs.
+
+    Accepted forms:
+      - OTEL_EXPORTER_OTLP_TIMEOUT in milliseconds
+      - OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS in seconds
+      - OTEL_TIMEOUT_SECONDS in seconds (legacy auth env)
+    """
+    raw_ms = _env("OTEL_EXPORTER_OTLP_TIMEOUT", "").strip()
+    if raw_ms:
+        try:
+            return float(raw_ms) / 1000.0
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("OTEL_EXPORTER_OTLP_TIMEOUT must be numeric") from exc
+
+    raw_seconds = _env("OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS", "").strip()
+    if raw_seconds:
+        try:
+            return float(raw_seconds)
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("OTEL_EXPORTER_OTLP_TIMEOUT_SECONDS must be numeric") from exc
+
+    raw_legacy = _env("OTEL_TIMEOUT_SECONDS", "").strip()
+    if raw_legacy:
+        try:
+            return float(raw_legacy)
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("OTEL_TIMEOUT_SECONDS must be numeric") from exc
+
+    return 10.0
+
+
+def _normalize_sampler_name(raw: str) -> str:
+    value = raw.strip().lower()
+    if value not in _VALID_OTEL_SAMPLERS:
+        raise RuntimeError(
+            "OTEL_TRACES_SAMPLER must be one of: "
+            "always_on, always_off, traceidratio, parentbased_always_on, "
+            "parentbased_always_off, parentbased_traceidratio"
+        )
+    return value
+
+
+def _sampler_ratio(sampler: str, raw_arg: str | None) -> float:
+    sampler = _normalize_sampler_name(sampler)
+
+    if sampler in {"always_on", "parentbased_always_on"}:
+        return 1.0
+    if sampler in {"always_off", "parentbased_always_off"}:
+        return 0.0
+
+    if sampler in {"traceidratio", "parentbased_traceidratio"}:
+        if raw_arg is None or raw_arg.strip() == "":
+            return 0.1
+        value = _float("OTEL_TRACES_SAMPLER_ARG", raw_arg)
+        if not 0.0 <= value <= 1.0:
+            raise RuntimeError("OTEL_TRACES_SAMPLER_ARG must be in the range [0.0, 1.0]")
+        return value
+
+    raise RuntimeError(
+        "OTEL_TRACES_SAMPLER must be one of: "
+        "always_on, always_off, traceidratio, parentbased_always_on, "
+        "parentbased_always_off, parentbased_traceidratio"
+    )
 
 
 def load_settings() -> Settings:
@@ -266,12 +341,19 @@ def load_settings() -> Settings:
 
     metrics_enabled = _bool("METRICS_ENABLED", "true")
 
-    raw_otel_endpoint = _env("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
-    otel_endpoint = raw_otel_endpoint or None
-    otel_traces_sampler = _env("OTEL_TRACES_SAMPLER", "parentbased_traceidratio").strip().lower() or "parentbased_traceidratio"
-    otel_traces_sampler_arg = _float("OTEL_TRACES_SAMPLER_ARG", "0.1")
-    trace_sample_ratio = otel_traces_sampler_arg
-    otel_timeout_seconds = _float("OTEL_TIMEOUT_SECONDS", "10.0")
+    raw_otel_endpoint = _env(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "http://signoz-otel-collector.signoz.svc.cluster.local:4317",
+    ).strip()
+    otel_endpoint = raw_otel_endpoint or "http://signoz-otel-collector.signoz.svc.cluster.local:4317"
+
+    otel_traces_sampler = _normalize_sampler_name(
+        _env("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
+    )
+    otel_traces_sampler_arg = _float("OTEL_TRACES_SAMPLER_ARG", _env("OTEL_TRACES_SAMPLER_ARG", "0.1"))
+    trace_sample_ratio = _sampler_ratio(otel_traces_sampler, _env("OTEL_TRACES_SAMPLER_ARG", ""))
+
+    otel_timeout_seconds = _env_otlp_timeout_seconds()
     otel_metric_export_interval_ms = _int("OTEL_METRIC_EXPORT_INTERVAL_MS", "15000")
     otel_metric_export_timeout_ms = _int("OTEL_METRIC_EXPORT_TIMEOUT_MS", "10000")
     log_level = _normalize_log_level(_env("LOG_LEVEL", "INFO"))
@@ -383,7 +465,10 @@ def validate_runtime_settings(settings: Settings) -> None:
         raise RuntimeError("At least one OAuth provider must be configured in production")
 
     if settings.otel_endpoint is not None:
-        parsed = urlparse(settings.otel_endpoint if "://" in settings.otel_endpoint else f"//{settings.otel_endpoint}", scheme="http")
+        parsed = urlparse(
+            settings.otel_endpoint if "://" in settings.otel_endpoint else f"//{settings.otel_endpoint}",
+            scheme="http",
+        )
         if parsed.scheme not in ("", "http", "https"):
             raise RuntimeError(f"OTEL_EXPORTER_OTLP_ENDPOINT has unsupported scheme: {parsed.scheme!r}")
         if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
@@ -393,20 +478,13 @@ def validate_runtime_settings(settings: Settings) -> None:
             raise RuntimeError("OTEL_EXPORTER_OTLP_ENDPOINT is invalid")
 
     if settings.otel_timeout_seconds <= 0:
-        raise RuntimeError("OTEL_TIMEOUT_SECONDS must be > 0")
+        raise RuntimeError("OTEL_TIMEOUT_SECONDS / OTEL_EXPORTER_OTLP_TIMEOUT must be > 0")
     if settings.otel_metric_export_interval_ms <= 0:
         raise RuntimeError("OTEL_METRIC_EXPORT_INTERVAL_MS must be > 0")
     if settings.otel_metric_export_timeout_ms <= 0:
         raise RuntimeError("OTEL_METRIC_EXPORT_TIMEOUT_MS must be > 0")
 
-    if settings.otel_traces_sampler not in {
-        "always_on",
-        "always_off",
-        "traceidratio",
-        "parentbased_always_on",
-        "parentbased_always_off",
-        "parentbased_traceidratio",
-    }:
+    if settings.otel_traces_sampler not in _VALID_OTEL_SAMPLERS:
         raise RuntimeError(
             "OTEL_TRACES_SAMPLER must be one of: "
             "always_on, always_off, traceidratio, parentbased_always_on, "

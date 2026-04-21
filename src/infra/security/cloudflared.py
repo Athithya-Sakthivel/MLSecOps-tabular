@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parents[3]
 OUT_DIR = ROOT / "src" / "manifests" / "cloudflared"
 
 NAMESPACE = os.getenv("NAMESPACE", "inference").strip() or "inference"
-IMAGE = os.getenv("IMAGE", "cloudflare/cloudflared:2026.3.0").strip() or "cloudflare/cloudflared:2026.3.0"
-REPLICAS = int(os.getenv("REPLICAS", "2"))
+IMAGE = os.getenv("IMAGE", "docker.io/cloudflare/cloudflared:2026.3.0@sha256:6b599ca3e974349ead3286d178da61d291961182ec3fe9c505e1dd02c8ac31b0").strip() or "cloudflare/cloudflared:2026.3.0"
+REPLICAS = int(os.getenv("REPLICAS", "1"))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "2000"))
 TUNNEL_PROTOCOL = os.getenv("TUNNEL_PROTOCOL", "http2").strip().lower() or "http2"
 DOMAIN = os.getenv("DOMAIN", "").strip().rstrip(".")

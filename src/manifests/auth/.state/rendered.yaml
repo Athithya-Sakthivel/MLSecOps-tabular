@@ -21,23 +21,6 @@ metadata:
     app.kubernetes.io/part-of: auth-svc
 automountServiceAccountToken: false
 ---
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: auth-service-pdb
-  namespace: inference
-  labels:
-    app.kubernetes.io/name: auth-service
-    app.kubernetes.io/managed-by: auth-service
-    app.kubernetes.io/component: auth
-    app.kubernetes.io/part-of: auth-svc
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: auth-service
-      app.kubernetes.io/component: auth
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,7 +32,7 @@ metadata:
     app.kubernetes.io/component: auth
     app.kubernetes.io/part-of: auth-svc
 spec:
-  replicas: 2
+  replicas: 1
   revisionHistoryLimit: 3
   progressDeadlineSeconds: 600
   strategy:
@@ -70,7 +53,7 @@ spec:
         app.kubernetes.io/part-of: auth-svc
         app.kubernetes.io/version: v1
       annotations:
-        auth-service.io/config-checksum: 12cbed46fb97992429136dcb967fa660c411243db2a2f21ba1fa6b89817ea401
+        auth-service.io/config-checksum: bbced194f79af610389634000ae5ff09e5c6f60853b7d731995139f4cc484c0d
     spec:
       serviceAccountName: auth-sa
       automountServiceAccountToken: false
@@ -102,7 +85,7 @@ spec:
         emptyDir: {}
       containers:
       - name: auth
-        image: ghcr.io/athithya-sakthivel/auth-service:2026-04-20-05-49--60a8f70@sha256:3b9ffe3bdb0249e3286d7d49d65192f07923f7df5804a4bec7e0ae348d06eaf8
+        image: ghcr.io/athithya-sakthivel/auth-service:2026-04-21-07-12--bac3944@sha256:95db66ef0e0426cfbd4077e3b52421c6c893bf5dd9b43dfafbaa14b491e2c50a
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
