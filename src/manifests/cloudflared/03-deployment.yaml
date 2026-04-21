@@ -18,7 +18,7 @@ spec:
         app.kubernetes.io/name: cloudflared
         app.kubernetes.io/component: tunnel
       annotations:
-        cloudflared/config-checksum: 5811e0d137f504e83964be0b835ae08896b6afa45ef64de8312c01aeb2716d5d
+        cloudflared/config-checksum: f9e1249d0f4038c8a475a1291875ba216c92f91a04cf0f4861ebc70bc96cac08
     spec:
       serviceAccountName: cloudflared-sa
       terminationGracePeriodSeconds: 60
