@@ -143,6 +143,7 @@ resource "cloudflare_pages_project" "frontend" {
   }
 }
 
+
 resource "cloudflare_dns_record" "frontend_cname" {
   zone_id = var.zone_id
   name    = local.app_hostname
