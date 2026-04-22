@@ -12,7 +12,7 @@ The service is split into five files with strict responsibilities:
 - `auth.py` — OAuth/OIDC protocol logic, PKCE generation, authorization URL creation, token exchange, ID token validation, provider-specific identity normalization, and policy enforcement.
 - `ui.py` — HTML rendering for login, redirects, success, and denial pages.
 
-The service follows a backend-for-frontend pattern for browser login. The browser receives an opaque session cookie. The server owns provider state, token exchange, and session lifecycle.
+The service follows a backend-for-frontend pattern for browser login. The browser receives an opaque session cookie. The server owns provider state, token exchange, and session lifecycle
 
 ## Runtime control flow
 
