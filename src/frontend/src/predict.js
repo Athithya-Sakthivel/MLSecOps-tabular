@@ -1,127 +1,93 @@
-import { fetchMe, isAuthed, login } from "./auth.js";
-import { renderNavbar } from "./ui/navbar.js";
+import '../assets/styles.css';
 
-const PREDICT_URL = "https://predict.athithya.site";
+import { displayName, loginUrl, refreshAuth, subscribeAuth } from './auth.js';
+import { renderNavbar } from './ui/navbar.js';
+import {
+  renderPredictionPage,
+  renderPredictionResult,
+  setPredictBanner,
+  wirePredictionForm,
+} from './ui/form.js';
 
-const state = {
-  features: [{ name: "", value: "" }],
-  result: null,
-  loading: false,
-};
+const header = document.getElementById('site-header');
+const app = document.getElementById('app');
 
-function render() {
-  const app = document.getElementById("app");
+const PREDICT_ORIGIN = new URL(import.meta.env.VITE_PREDICT_ORIGIN || 'https://predict.athithya.site');
 
-  app.innerHTML = `
-    <div style="max-width:900px;margin:60px auto;padding:20px;">
+async function submitPrediction(payload) {
+  const response = await fetch(new URL('/predict', PREDICT_ORIGIN), {
+    method: 'POST',
+    credentials: 'include',
+    mode: 'cors',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
 
-      <div id="navbar-root"></div>
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
 
-      <h1>Prediction</h1>
+  return { response, data };
+}
 
-      ${
-        !isAuthed()
-          ? `
-        <div style="background:#fee2e2;color:#991b1b;padding:10px;border-radius:8px;margin:10px 0;">
-          You are not logged in.
-          <button id="loginBtn">Login</button>
-        </div>
-      `
-          : ""
+function renderPage(state) {
+  if (!app) return;
+  app.innerHTML = renderPredictionPage({ authState: state });
+  setPredictBanner(app, { authenticated: state.authenticated, userLabel: displayName(state) });
+
+  const authRequiredButton = app.querySelector('[data-auth-banner] .button');
+  if (authRequiredButton && !state.authenticated) {
+    authRequiredButton.href = loginUrl('/predict.html');
+  }
+
+  wirePredictionForm(app, {
+    authenticated: () => Boolean(state.authenticated),
+    onSubmit: async ({ kind, payload }) => {
+      const result = app.querySelector('#predict-result');
+      if (kind === 'auth_required') {
+        if (result) result.textContent = 'Please sign in first.';
+        window.location.assign(loginUrl('/predict.html'));
+        return;
       }
 
-      <div style="margin-top:20px;">
-        ${state.features
-          .map(
-            (f, i) => `
-          <div style="display:flex;gap:10px;margin-bottom:8px;">
-            <input data-i="${i}" data-k="name"
-                   value="${f.name}"
-                   placeholder="feature" />
+      try {
+        const { response, data } = await submitPrediction(payload);
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            await refreshAuth();
+            if (result) result.textContent = 'Your session expired. Sign in again.';
+            return;
+          }
+          if (result) result.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+          return;
+        }
 
-            <input data-i="${i}" data-k="value"
-                   value="${f.value}"
-                   placeholder="value" />
-
-            <button data-remove="${i}">x</button>
-          </div>
-        `
-          )
-          .join("")}
-
-        <div style="display:flex;gap:10px;margin-top:10px;">
-          <button id="addBtn">Add feature</button>
-          <button id="predictBtn">Predict</button>
-        </div>
-      </div>
-
-      <pre style="margin-top:20px;background:#0f172a;color:white;padding:12px;border-radius:8px;">
-${state.loading ? "Loading..." : JSON.stringify(state.result, null, 2)}
-      </pre>
-    </div>
-  `;
-
-  bind();
-  renderNavbar("navbar-root");
-
-  const loginBtn = document.getElementById("loginBtn");
-  if (loginBtn) loginBtn.onclick = () => login();
-}
-
-function bind() {
-  document.querySelectorAll("input").forEach((input) => {
-    input.oninput = (e) => {
-      const i = Number(e.target.dataset.i);
-      const key = e.target.dataset.k;
-      state.features[i][key] = e.target.value;
-    };
+        renderPredictionResult(app, data);
+      } catch (error) {
+        if (result) {
+          result.textContent = error instanceof Error ? `Network error: ${error.message}` : 'Network error.';
+        }
+      }
+    },
   });
+}
 
-  document.querySelectorAll("[data-remove]").forEach((btn) => {
-    btn.onclick = () => {
-      const i = Number(btn.dataset.remove);
-      state.features.splice(i, 1);
-      render();
-    };
+async function bootstrap() {
+  const state = await refreshAuth();
+  if (header) renderNavbar(header, state);
+  renderPage(state);
+
+  subscribeAuth((nextState) => {
+    if (header) renderNavbar(header, nextState);
+    renderPage(nextState);
   });
-
-  document.getElementById("addBtn").onclick = () => {
-    state.features.push({ name: "", value: "" });
-    render();
-  };
-
-  document.getElementById("predictBtn").onclick = async () => {
-    if (!isAuthed()) return;
-
-    state.loading = true;
-    render();
-
-    const payload = {};
-    for (const f of state.features) {
-      if (f.name) payload[f.name] = f.value;
-    }
-
-    try {
-      const res = await fetch(`${PREDICT_URL}/predict`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      state.result = await res.json();
-    } catch (e) {
-      state.result = { error: e.message };
-    } finally {
-      state.loading = false;
-      render();
-    }
-  };
 }
 
-async function boot() {
-  await fetchMe();
-  render();
-}
-
-boot();
+void bootstrap();

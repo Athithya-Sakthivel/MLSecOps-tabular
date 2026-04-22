@@ -1,101 +1,55 @@
-import { authState, login, logout } from "../auth.js";
+import { displayName, loginUrl, logout } from '../auth.js';
 
-let listeners = new Set();
-
-/**
- * subscribe to auth changes
- */
-export function subscribeNavbar(fn) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
-export function notifyNavbar() {
-  listeners.forEach((fn) => fn());
+function pageLabel(pathname) {
+  if (pathname.endsWith('/predict.html')) return 'Predict';
+  return 'Home';
 }
 
-/**
- * Top-right reactive navbar
- */
-export function renderNavbar() {
-  const root = document.getElementById("navbar-root");
+export function renderNavbar(root, authState) {
   if (!root) return;
 
-  const user = authState.user;
+  const loggedIn = Boolean(authState?.authenticated);
+  const userLabel = escapeHtml(displayName(authState));
+  const actionClass = loggedIn ? 'button button--logout' : 'button button--login';
+  const actionText = loggedIn ? 'Logout' : 'Login';
+  const actionHref = loggedIn ? '#' : loginUrl(window.location.pathname + window.location.search + window.location.hash);
+  const page = pageLabel(window.location.pathname);
+  const subtitle = loggedIn
+    ? 'Session active'
+    : 'Sign in to use the prediction form';
 
   root.innerHTML = `
-    <div style="
-      position:fixed;
-      top:16px;
-      right:16px;
-      z-index:9999;
-      display:flex;
-      align-items:center;
-      gap:10px;
-    ">
-
-      ${
-        user
-          ? `
-        <span style="
-          background:#e0f2fe;
-          color:#1d4ed8;
-          padding:6px 10px;
-          border-radius:999px;
-          font-weight:600;
-          font-size:13px;
-        ">
-          ${user.name || user.email || "User"}
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Tabular ML Inference home">
+        <img class="brand__logo" src="/assets/logo.png" alt="" width="44" height="44" />
+        <span class="brand__text">
+          <strong>Tabular ML Inference</strong>
+          <small>${page} · ${subtitle}</small>
         </span>
+      </a>
 
-        <button id="authBtn"
-          style="
-            background:#dc2626;
-            color:white;
-            border:none;
-            padding:8px 12px;
-            border-radius:8px;
-            cursor:pointer;
-            font-weight:600;
-          ">
-          Logout
-        </button>
-      `
-          : `
-        <button id="authBtn"
-          style="
-            background:#2563eb;
-            color:white;
-            border:none;
-            padding:8px 12px;
-            border-radius:8px;
-            cursor:pointer;
-            font-weight:600;
-          ">
-          Login
-        </button>
-      `
-      }
-
-    </div>
+      <div class="auth-area">
+        <span class="auth-chip ${loggedIn ? 'auth-chip--ok' : 'auth-chip--idle'}">${userLabel}</span>
+        ${loggedIn
+          ? `<button type="button" class="${actionClass}" data-auth-logout>${actionText}</button>`
+          : `<a class="${actionClass}" href="${actionHref}" data-auth-login>${actionText}</a>`}
+      </div>
+    </header>
   `;
 
-  const btn = document.getElementById("authBtn");
-
-  if (user) {
-    btn.onclick = async () => {
-      await logout();
-      notifyNavbar();
-      renderNavbar();
-    };
-  } else {
-    btn.onclick = () => login("google");
+  const logoutButton = root.querySelector('[data-auth-logout]');
+  if (logoutButton) {
+    logoutButton.addEventListener('click', () => {
+      void logout('/');
+    });
   }
-}
-
-/**
- * Reactive update trigger
- */
-export function refreshNavbar() {
-  renderNavbar();
 }

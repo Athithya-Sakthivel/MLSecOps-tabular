@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import httpx
 from auth import (
@@ -23,6 +23,7 @@ from auth import (
     pkce_challenge,
     pkce_verifier,
     provider_config,
+    return_to_url,
     validate_id_token,
 )
 from db import (
@@ -86,10 +87,7 @@ def _security_headers(response: Response) -> None:
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "interest-cohort=()")
-    response.headers.setdefault(
-        "Strict-Transport-Security",
-        "max-age=31536000; includeSubDomains",
-    )
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 
 
 def _json(payload: Any, status_code: int, request_id: str | None = None) -> JSONResponse:
@@ -115,40 +113,6 @@ def _redirect(location: str, request_id: str | None = None) -> RedirectResponse:
     if request_id:
         response.headers[REQUEST_ID_HEADER] = request_id
     return response
-
-
-def _app_home_url() -> str:
-    explicit = str(getattr(SETTINGS, "app_home_url", "") or "").strip().rstrip("/")
-    if explicit:
-        return explicit
-
-    base_url = str(getattr(SETTINGS, "app_base_url", "") or "").strip().rstrip("/")
-    if not base_url:
-        return "/"
-
-    parsed = urlparse(base_url)
-    scheme = parsed.scheme or "https"
-    host = parsed.hostname or ""
-    if host.startswith("auth."):
-        return f"{scheme}://app.{host.removeprefix('auth.')}"
-    return base_url
-
-
-def _cors_origins() -> list[str]:
-    explicit = getattr(SETTINGS, "web_allowed_origins", None)
-    if isinstance(explicit, list) and explicit:
-        return explicit
-    return [_app_home_url()]
-
-
-def _return_to_url(next_value: str | None) -> str:
-    path = normalize_next(next_value)
-    home = _app_home_url().rstrip("/")
-    if path == "/":
-        return home
-    if path.startswith("/"):
-        return f"{home}{path}"
-    return home
 
 
 def _resolve_session_id(request: Request) -> str | None:
@@ -217,61 +181,7 @@ def _pool(request: Request):
 
 def _provider_links(next_value: str) -> dict[str, str]:
     safe_next = quote(next_value, safe="/?=&")
-    return {
-        provider: f"/login/start/{provider}?next={safe_next}"
-        for provider in enabled_providers(SETTINGS)
-    }
-
-
-def _policy_lines() -> list[str]:
-    lines: list[str] = []
-
-    google_domains = [
-        str(item).strip()
-        for item in getattr(SETTINGS, "google_allowed_domains", []) or []
-        if str(item).strip()
-    ]
-    if google_domains:
-        lines.append(f"Google allowed domains: {', '.join(google_domains)}")
-
-    microsoft_tenant_ids = [
-        str(item).strip()
-        for item in getattr(SETTINGS, "microsoft_allowed_tenant_ids", []) or []
-        if str(item).strip()
-    ]
-    if microsoft_tenant_ids:
-        lines.append(f"Microsoft allowed tenant IDs: {', '.join(microsoft_tenant_ids)}")
-
-    microsoft_domains = [
-        str(item).strip()
-        for item in getattr(SETTINGS, "microsoft_allowed_domains", []) or []
-        if str(item).strip()
-    ]
-    if microsoft_domains:
-        lines.append(f"Microsoft allowed domains: {', '.join(microsoft_domains)}")
-
-    github_orgs = [
-        str(item).strip()
-        for item in getattr(SETTINGS, "github_allowed_orgs", []) or []
-        if str(item).strip()
-    ]
-    if github_orgs:
-        lines.append(f"GitHub allowed orgs: {', '.join(github_orgs)}")
-
-    return lines
-
-
-def _render_login_response(request_id: str, next_value: str) -> HTMLResponse:
-    html = login_page(
-        SETTINGS.app_name,
-        enabled_providers(SETTINGS),
-        _provider_links(next_value),
-        "Use an enabled provider to sign in.",
-        policy_lines=_policy_lines(),
-    )
-    response = _html(html, 200, request_id)
-    _security_headers(response)
-    return response
+    return {provider: f"/login/start/{provider}?next={safe_next}" for provider in enabled_providers(SETTINGS)}
 
 
 async def _provider_cfg(provider: str):
@@ -279,6 +189,31 @@ async def _provider_cfg(provider: str):
     if provider not in enabled_providers(SETTINGS):
         raise LookupError(provider)
     return await provider_config(SETTINGS, provider)
+
+
+async def _peek_auth_transaction(request: Request, state: str) -> dict[str, Any] | None:
+    pool = _pool(request)
+    row = await pool.fetchrow(
+        """
+        SELECT
+            state,
+            provider,
+            code_verifier,
+            nonce,
+            redirect_uri,
+            return_to,
+            expires_at,
+            ip_addr,
+            user_agent
+        FROM auth_transactions
+        WHERE state = $1
+        LIMIT 1
+        """,
+        state,
+    )
+    if row is None:
+        return None
+    return dict(row)
 
 
 async def _session_lookup(request: Request, request_id: str, session_id: str) -> JSONResponse:
@@ -304,7 +239,7 @@ async def _login_start(request: Request, provider: str, next_value: str, request
         cfg = await _provider_cfg(provider)
     except LookupError:
         response = _html(
-            denied_page("Provider unavailable", "That login provider is not enabled.", allowed=", ".join(enabled_providers(SETTINGS)) or None),
+            denied_page("Provider unavailable", "That login provider is not enabled."),
             status_code=404,
             request_id=request_id,
         )
@@ -314,7 +249,7 @@ async def _login_start(request: Request, provider: str, next_value: str, request
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page("Login unavailable", "Could not initialize the selected provider.", details=str(exc), allowed="; ".join(_policy_lines()) or None),
+            denied_page("Login unavailable", "Could not initialize the selected provider.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
@@ -343,17 +278,9 @@ async def _login_start(request: Request, provider: str, next_value: str, request
         )
     except Exception as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.exception(
-            "auth_transaction_create_failed",
-            extra={"provider": provider, "request_id": request_id},
-        )
+        logger.exception("auth_transaction_create_failed", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page(
-                "Login unavailable",
-                "Unable to create the login transaction.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login unavailable", "Unable to create the login transaction.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
@@ -375,7 +302,6 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
                 "Login denied",
                 "The identity provider rejected the login attempt.",
                 details=f"{request.query_params.get('error')}: {request.query_params.get('error_description') or ''}".strip(),
-                allowed="; ".join(_policy_lines()) or None,
             ),
             status_code=403,
             request_id=request_id,
@@ -387,11 +313,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
     state = request.query_params.get("state")
     if not code or not state:
         response = _html(
-            denied_page(
-                "Login failed",
-                "Missing authorization response.",
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login failed", "Missing authorization response."),
             status_code=400,
             request_id=request_id,
         )
@@ -402,11 +324,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         cfg = await _provider_cfg(provider)
     except LookupError:
         response = _html(
-            denied_page(
-                "Provider unavailable",
-                "That login provider is not enabled.",
-                allowed=", ".join(enabled_providers(SETTINGS)) or None,
-            ),
+            denied_page("Provider unavailable", "That login provider is not enabled."),
             status_code=404,
             request_id=request_id,
         )
@@ -416,12 +334,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("provider_config_failed", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page(
-                "Login unavailable",
-                "Could not initialize the selected provider.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login unavailable", "Could not initialize the selected provider.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
@@ -429,32 +342,38 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         return response
 
     try:
-        tx = await consume_auth_transaction(_pool(request), state)
+        tx = await _peek_auth_transaction(request, state)
+        if tx is None:
+            raise ValueError("auth_transaction_missing")
         if tx["provider"] != provider:
             raise ValueError("provider_mismatch")
         if tx["redirect_uri"] != callback_url(SETTINGS, provider):
             raise ValueError("redirect_uri_mismatch")
+        if tx["expires_at"] and tx["expires_at"] < datetime.now(UTC):
+            raise ValueError("auth_transaction_expired")
     except ValueError as exc:
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
-        logger.warning(
-            "auth_transaction_invalid",
-            extra={"provider": provider, "request_id": request_id, "error": str(exc)},
-        )
+        logger.warning("auth_transaction_invalid", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
         response = _html(
-            denied_page(
-                "Login failed",
-                "The login transaction is invalid or expired.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login failed", "The login transaction is invalid or expired.", details=str(exc)),
             status_code=400,
+            request_id=request_id,
+        )
+        _security_headers(response)
+        return response
+    except Exception as exc:
+        _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
+        logger.exception("auth_transaction_lookup_failed", extra={"provider": provider, "request_id": request_id})
+        response = _html(
+            denied_page("Login unavailable", "Unable to load the login transaction.", details=str(exc)),
+            status_code=503,
             request_id=request_id,
         )
         _security_headers(response)
         return response
 
     try:
-        token_response = await exchange_code(cfg, code, tx["code_verifier"])
+        token_response = await exchange_code(cfg, code, tx["redirect_uri"], tx["code_verifier"])
         access_token = token_response.get("access_token") or ""
         id_token = token_response.get("id_token") or ""
 
@@ -479,6 +398,8 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
             orgs = {str(org).lower() for org in claims.get("orgs", []) if str(org).strip()}
             if not orgs.intersection(allowed):
                 raise ValueError("github_org_not_allowed")
+
+        await consume_auth_transaction(_pool(request), state)
 
         user, _external = await find_or_create_user(
             _pool(request),
@@ -510,7 +431,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
             user_agent=_user_agent(request),
         )
 
-        response = _redirect(_return_to_url(tx["return_to"]), request_id)
+        response = _redirect(return_to_url(SETTINGS, tx["return_to"]), request_id)
         response.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=session["id"],
@@ -529,12 +450,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _span_error(exc, request_id=request_id, provider=provider, error_type="timeout")
         logger.warning("provider_timeout", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page(
-                "Login unavailable",
-                "The identity provider timed out.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login unavailable", "The identity provider timed out.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
@@ -544,12 +460,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("provider_unreachable", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page(
-                "Login unavailable",
-                "The identity provider is unavailable.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login unavailable", "The identity provider is unavailable.", details=str(exc)),
             status_code=503,
             request_id=request_id,
         )
@@ -559,12 +470,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("provider_http_error", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page(
-                "Login failed",
-                "The identity provider rejected the exchange.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login failed", "The identity provider rejected the exchange.", details=str(exc)),
             status_code=502,
             request_id=request_id,
         )
@@ -574,12 +480,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.warning("login_failed", extra={"provider": provider, "request_id": request_id, "error": str(exc)})
         response = _html(
-            denied_page(
-                "Login failed",
-                "Authentication was rejected.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login failed", "Authentication was rejected.", details=str(exc)),
             status_code=403,
             request_id=request_id,
         )
@@ -589,12 +490,7 @@ async def _callback(request: Request, provider: str, request_id: str) -> Respons
         _span_error(exc, request_id=request_id, provider=provider, error_type=exc.__class__.__name__)
         logger.exception("callback_failed", extra={"provider": provider, "request_id": request_id})
         response = _html(
-            denied_page(
-                "Login failed",
-                "The authentication flow could not be completed.",
-                details=str(exc),
-                allowed="; ".join(_policy_lines()) or None,
-            ),
+            denied_page("Login failed", "The authentication flow could not be completed.", details=str(exc)),
             status_code=502,
             request_id=request_id,
         )
@@ -627,7 +523,7 @@ async def _logout(request: Request, request_id: str) -> Response:
             _security_headers(response)
             return response
 
-    response = _redirect(_app_home_url(), request_id)
+    response = _redirect(SETTINGS.app_home_url, request_id)
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path=SETTINGS.session_cookie_path,
@@ -649,7 +545,7 @@ async def _readyz(request: Request, request_id: str) -> Response:
             "status": "ok",
             "service_name": SETTINGS.service_name,
             "service_version": SETTINGS.service_version,
-            "app_home_url": _app_home_url(),
+            "app_home_url": SETTINGS.app_home_url,
             "validate_route": validate_url(SETTINGS),
             "me_route": f"{SETTINGS.app_base_url}{SETTINGS.me_route_path}",
         },
@@ -659,7 +555,20 @@ async def _readyz(request: Request, request_id: str) -> Response:
 
 
 async def _root(_: Request, request_id: str) -> Response:
-    return _render_login_response(request_id, "/")
+    return _json(
+        {
+            "status": "ok",
+            "service_name": SETTINGS.service_name,
+            "service_version": SETTINGS.service_version,
+            "environment": SETTINGS.environment,
+            "enabled_providers": enabled_providers(SETTINGS),
+            "app_home_url": SETTINGS.app_home_url,
+            "validate_route": validate_url(SETTINGS),
+            "me_route": f"{SETTINGS.app_base_url}{SETTINGS.me_route_path}",
+        },
+        200,
+        request_id,
+    )
 
 
 @asynccontextmanager
@@ -735,7 +644,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
+    allow_origins=SETTINGS.web_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -793,7 +702,7 @@ async def observability_middleware(request: Request, call_next):
     return response
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def root(request: Request):
     return await _root(request, _request_id(request))
 
@@ -835,9 +744,13 @@ async def logout(request: Request):
 async def login(request: Request):
     request_id = _request_id(request)
     next_value = normalize_next(request.query_params.get("next"))
-    response = _render_login_response(request_id, next_value)
-    _security_headers(response)
-    return response
+    html = login_page(
+        SETTINGS.app_name,
+        enabled_providers(SETTINGS),
+        _provider_links(next_value),
+        "Use an enabled provider to sign in.",
+    )
+    return _html(html, 200, request_id)
 
 
 @app.get("/login/start/{provider}")
